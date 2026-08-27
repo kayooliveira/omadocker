@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "id": "kayooliveira.omadocker",
+  "name": "OmaDocker",
+  "version": "2.0.0",
+  "author": "Kayo Oliveira",
+  "license": "MIT",
+  "description": "Docker containers in the Omarchy bar: what is running, what died, live CPU and memory, and start/stop/restart/logs without a terminal.",
+  "homepage": "https://github.com/kayooliveira/omadocker",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaDocker",
+    "description": "Groups containers by Compose project, shows live CPU and memory for the running ones, and starts, stops, restarts or tails the logs of any of them from the panel.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 15,
+      "showStopped": true,
+      "showStats": true,
+      "hideWhenEmpty": false
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "description": "How often the bar glyph re-reads Docker. The panel refreshes every 3 seconds while it is open, regardless of this.",
+        "min": 5,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 15
+      },
+      {
+        "key": "showStopped",
+        "type": "boolean",
+        "label": "Show stopped containers",
+        "description": "Off lists only running containers, which keeps the panel short on a machine with a long history of one-off runs.",
+        "defaultValue": true
+      },
+      {
+        "key": "showStats",
+        "type": "boolean",
+        "label": "Show CPU and memory",
+        "description": "Off skips the docker stats call entirely. Worth turning off on a laptop: sampling every running container costs about a second of work each time the panel is open.",
+        "defaultValue": true
+      },
+      {
+        "key": "hideWhenEmpty",
+        "type": "boolean",
+        "label": "Hide the bar icon when there are no containers",
+        "description": "On removes the button from the bar until Docker has something to show.",
+        "defaultValue": false
+      }
+    ]
+  }
+}
