@@ -486,6 +486,7 @@ Panel {
       anchors.left: parent.left
       anchors.bottom: parent.bottom
       text: header.title.toUpperCase()
+      textFormat: Text.PlainText
       foreground: root.foreground
       fontFamily: root.fontFamily
     }
@@ -499,6 +500,7 @@ Panel {
       Text {
         anchors.verticalCenter: parent.verticalCenter
         text: header.running + "/" + header.total
+        textFormat: Text.PlainText
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -725,6 +727,7 @@ Panel {
       anchors.left: parent.left
       anchors.verticalCenter: parent.verticalCenter
       text: meter.caption
+      textFormat: Text.PlainText
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption

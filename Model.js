@@ -16,6 +16,28 @@ var UNGROUPED = "\\x00ungrouped"
 
 var UP_STATES = ["running", "restarting", "removing"]
 
+var MAX_FIELD = 64
+
+function sanitize(value, maxLength) {
+  var text = String(value === undefined || value === null ? "" : value)
+  var limit = maxLength > 0 ? maxLength : MAX_FIELD
+  var out = ""
+  for (var i = 0; i < text.length; i++) {
+    var code = text.charCodeAt(i)
+    if (code < 0x20 || code === 0x7F || (code >= 0x80 && code <= 0x9F)) continue
+    var ch = text.charAt(i)
+    if (ch === "<" || ch === ">" || ch === "&") continue
+    out += ch
+  }
+  out = out.replace(/^\s+|\s+$/g, "")
+  if (out.length > limit) out = out.substring(0, limit - 1) + "\u2026"
+  return out
+}
+
+function isContainerId(value) {
+  return /^[A-Za-z0-9]{1,128}$/.test(String(value || ""))
+}
+
 function trim(value) {
   return String(value === undefined || value === null ? "" : value).replace(/^\s+|\s+$/g, "")
 }
@@ -113,16 +135,16 @@ function normalizeContainer(raw) {
   var status = trim(raw && raw.Status)
   var container = {
     id: trim(raw && raw.ID),
-    name: trim(raw && raw.Names).split(",")[0],
-    image: trim(raw && raw.Image),
-    shortImage: shortImage(raw && raw.Image),
-    state: state,
-    status: status,
+    name: sanitize(trim(raw && raw.Names).split(",")[0]),
+    image: sanitize(raw && raw.Image),
+    shortImage: sanitize(shortImage(raw && raw.Image)),
+    state: sanitize(state, 24),
+    status: sanitize(status, 48),
     health: healthOf(raw),
     exitCode: exitCode(status),
-    project: composeProject(raw && raw.Labels),
-    service: labelValue(raw && raw.Labels, "com.docker.compose.service"),
-    ports: hostPorts(raw && raw.Ports),
+    project: sanitize(composeProject(raw && raw.Labels), 32),
+    service: sanitize(labelValue(raw && raw.Labels, "com.docker.compose.service"), 32),
+    ports: hostPorts(raw && raw.Ports).slice(0, 6),
     up: isUp(state)
   }
   container.failing = isFailing(container)
@@ -135,7 +157,7 @@ function normalizeContainers(rawList) {
   var list = rawList || []
   for (var i = 0; i < list.length; i++) {
     var container = normalizeContainer(list[i])
-    if (container.id) out.push(container)
+    if (isContainerId(container.id)) out.push(container)
   }
   return out
 }
@@ -160,9 +182,9 @@ function indexStats(rawList) {
     if (!id) continue
     out[id] = {
       id: id,
-      cpu: trim(row.CPUPerc),
+      cpu: sanitize(row.CPUPerc, 12),
       cpuPercent: parsePercent(row.CPUPerc),
-      mem: memUsed(row.MemUsage),
+      mem: sanitize(memUsed(row.MemUsage), 12),
       memPercent: parsePercent(row.MemPerc)
     }
   }
@@ -226,7 +248,7 @@ function sectionsFor(containers) {
     }
     sections.push({
       key: order[j],
-      title: order[j] === UNGROUPED ? "Ungrouped" : order[j],
+      title: order[j] === UNGROUPED ? "Ungrouped" : sanitize(order[j], 32),
       containers: members,
       runningIds: running,
       stoppedIds: stopped,
@@ -363,7 +385,7 @@ function subtitleText(container) {
   if (container.shortImage) parts.push(container.shortImage)
   var line = parts.join(" · ")
   if (container.ports.length > 0) line += (line ? "  " : "") + ":" + container.ports.join(" :")
-  return line
+  return sanitize(line, 96)
 }
 
 function sectionAction(section) {
