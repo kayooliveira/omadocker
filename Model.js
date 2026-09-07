@@ -1,13 +1,5 @@
 .pragma library
 
-// Everything Omadocker can decide without running a command.
-//
-// A QML `.pragma library` script: `var` and `function` declarations only, no
-// imports, no QML objects, no side effects. That is what lets tests/ run it
-// under plain node, so decisions belong here rather than in Panel.qml.
-
-// Built from code points rather than pasted: editing tools mangle multi-byte
-// sequences in QML, and the result is a blank box with nothing in any log.
 var Glyph = {
   docker: String.fromCodePoint(0xF0868),
   play: String.fromCodePoint(0xF040A),
@@ -20,20 +12,14 @@ var Glyph = {
   search: String.fromCodePoint(0xF0349)
 }
 
-// Section key for containers with no Compose project. Leading space so it
-// cannot collide with a project genuinely named "ungrouped".
 var UNGROUPED = "\\x00ungrouped"
 
-// `restarting` and `removing` count as up: they hold resources, and neither
-// is something you start.
 var UP_STATES = ["running", "restarting", "removing"]
 
 function trim(value) {
   return String(value === undefined || value === null ? "" : value).replace(/^\s+|\s+$/g, "")
 }
 
-// One JSON object per line. Parsed line by line rather than through `jq -s`
-// so one malformed line loses one container instead of the whole list.
 function parseJsonLines(raw) {
   var lines = String(raw || "").split("\n")
   var out = []
@@ -43,15 +29,11 @@ function parseJsonLines(raw) {
     try {
       out.push(JSON.parse(line))
     } catch (e) {
-      // One unreadable line is not worth losing the rest of the list over.
     }
   }
   return out
 }
 
-// Labels arrive as one comma-separated `key=value` string whose values may
-// themselves contain commas (compose writes a path list into `config_files`),
-// so only fragments that look like a fresh pair are treated as one.
 function labelValue(labels, key) {
   var parts = String(labels || "").split(",")
   for (var i = 0; i < parts.length; i++) {
@@ -70,8 +52,6 @@ function isUp(state) {
   return UP_STATES.indexOf(trim(state).toLowerCase()) !== -1
 }
 
-// `HealthStatus` on modern daemons, a "(healthy)" suffix on the status line
-// everywhere else. It is the literal string "none" without a HEALTHCHECK.
 function healthOf(raw) {
   var direct = trim(raw && raw.HealthStatus).toLowerCase()
   if (direct && direct !== "none") return direct
@@ -81,34 +61,22 @@ function healthOf(raw) {
   return found === "health: starting" ? "starting" : found
 }
 
-// Exit code out of "Exited (137) 2 hours ago", or -1 if it has not exited —
-// so callers tell a clean stop (0) from a running container without a
-// second state check.
 function exitCode(status) {
   var match = String(status || "").match(/^Exited \((\d+)\)/)
   return match ? parseInt(match[1], 10) : -1
 }
 
-// Two questions, deliberately not the same one.
-//
-// `failing` — "this ended badly" — colours the row's own status line.
-// `alerting` — "this needs you now" — is the only thing that turns the bar
-// glyph urgent. A non-zero exit from yesterday is the first but not the
-// second: a widget that goes red for it stays red until someone prunes, and
-// a permanently red icon is one nobody reads.
 function isFailing(container) {
   if (!container) return false
-  if (container.health === "unhealthy") return true
-  return !container.up && container.exitCode > 0
+  if (container.up) return container.health === "unhealthy"
+  return container.exitCode > 0
 }
 
 function isAlerting(container) {
-  if (!container) return false
+  if (!container || !container.up) return false
   return container.health === "unhealthy" || container.state === "restarting"
 }
 
-// Published host ports, deduplicated. Docker prints one mapping per address
-// family, so `-p 3000:3000` arrives twice and would read as two ports.
 function hostPorts(ports) {
   var seen = {}
   var out = []
@@ -124,8 +92,6 @@ function hostPorts(ports) {
   return out
 }
 
-// "ghcr.io/xpto/xpto:1" -> "xpto/xpto". The row has
-// one line for this, and the registry is never the identifying part.
 function shortImage(image) {
   var value = trim(image)
   if (!value) return ""
@@ -174,8 +140,6 @@ function normalizeContainers(rawList) {
   return out
 }
 
-// "0.75%" -> 0.75, or -1 when unreadable, so a meter can tell "no reading
-// yet" from "idle" instead of drawing a confident empty bar.
 function parsePercent(value) {
   var match = String(value || "").match(/(-?\d+(?:\.\d+)?)\s*%/)
   if (!match) return -1
@@ -183,14 +147,10 @@ function parsePercent(value) {
   return isFinite(n) ? n : -1
 }
 
-// "238.5MiB / 31.21GiB" -> "238.5MiB". The limit is the host's total unless
-// the container set one, so printing it repeats one number down the list.
 function memUsed(usage) {
   return trim(String(usage || "").split("/")[0])
 }
 
-// Both commands report the same short id, so this is a plain hash join
-// rather than the prefix matching the two-id format invites.
 function indexStats(rawList) {
   var out = {}
   var list = rawList || []
@@ -229,17 +189,12 @@ function filterContainers(containers, query) {
   return out
 }
 
-// Running first, then failing, then by name — so the row someone opened the
-// panel to find is near the top of its section.
 function compareContainers(a, b) {
   if (a.up !== b.up) return a.up ? -1 : 1
   if (!a.up && a.failing !== b.failing) return a.failing ? -1 : 1
   return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0)
 }
 
-// Group by Compose project: it is the unit people start and stop. Loose
-// containers get one trailing section, whose header is dropped when it is the
-// only one — three loose containers should not be labelled "ungrouped".
 function sectionsFor(containers) {
   var list = (containers || []).slice()
   var byProject = {}
@@ -280,26 +235,31 @@ function sectionsFor(containers) {
     })
   }
 
-  // One unnamed section is just a list; labelling it adds a header that says
-  // nothing the rows do not already say.
   if (sections.length === 1 && sections[0].key === UNGROUPED) sections[0].title = ""
   return sections
 }
 
-// One row per container, each carrying the header it should draw above
-// itself. Headers as rows of their own would make the cursor index differ
-// from the row index; this way they are the same number.
 function rowsFor(sections) {
   var rows = []
   var list = sections || []
   for (var i = 0; i < list.length; i++) {
     var section = list[i]
     for (var j = 0; j < section.containers.length; j++) {
+      var c = section.containers[j]
       rows.push({
-        key: section.containers[j].id,
-        container: section.containers[j],
-        section: section,
+        key: c.id,
+        id: c.id,
+        name: c.name,
+        subtitle: subtitleText(c),
+        status: statusText(c),
+        up: c.up,
+        failing: c.failing,
+        restarting: c.state === "restarting",
+        unhealthy: c.health === "unhealthy",
+        sectionKey: section.key,
         sectionTitle: j === 0 ? section.title : "",
+        sectionRunning: section.runningCount,
+        sectionTotal: section.total,
         firstSection: i === 0
       })
     }
@@ -307,12 +267,58 @@ function rowsFor(sections) {
   return rows
 }
 
-// Resolved on read rather than stored: rows are rebuilt whenever the list
-// changes shape, and a container that disappears should move the cursor
-// rather than leave a stale reference behind.
-function containerAtCursor(rows, cursorIndex) {
+var ROW_FIELDS = ["name", "subtitle", "status", "up", "failing", "restarting",
+  "unhealthy", "sectionKey", "sectionTitle", "sectionRunning", "sectionTotal",
+  "firstSection"]
+
+function reconcilePlan(currentKeys, nextRows) {
+  var keys = (currentKeys || []).slice()
+  var next = nextRows || []
+  var ops = []
+
+  var wanted = {}
+  for (var i = 0; i < next.length; i++) wanted[next[i].key] = true
+
+  for (var r = keys.length - 1; r >= 0; r--) {
+    if (wanted[keys[r]]) continue
+    ops.push({ op: "remove", index: r })
+    keys.splice(r, 1)
+  }
+
+  for (var n = 0; n < next.length; n++) {
+    if (keys[n] === next[n].key) continue
+    var found = keys.indexOf(next[n].key, n)
+    if (found > n) {
+      ops.push({ op: "move", from: found, to: n })
+      keys.splice(n, 0, keys.splice(found, 1)[0])
+    } else {
+      ops.push({ op: "insert", index: n, row: next[n] })
+      keys.splice(n, 0, next[n].key)
+    }
+  }
+  return ops
+}
+
+function containerById(containers, id) {
+  var list = containers || []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id === id) return list[i]
+  }
+  return null
+}
+
+function containerAtCursor(containers, rows, cursorIndex) {
   var list = rows || []
-  return (cursorIndex >= 0 && cursorIndex < list.length) ? list[cursorIndex].container : null
+  if (cursorIndex < 0 || cursorIndex >= list.length) return null
+  return containerById(containers, list[cursorIndex].id)
+}
+
+function sectionByKey(sections, key) {
+  var list = sections || []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].key === key) return list[i]
+  }
+  return null
 }
 
 function clampCursor(cursorIndex, total) {
@@ -334,8 +340,6 @@ function counts(containers) {
   return out
 }
 
-// The line under the panel title, and the bar tooltip. Trouble leads the
-// tally when there is any.
 function summaryText(containers, daemonUp) {
   if (!daemonUp) return "Docker daemon unreachable"
   var c = counts(containers)
@@ -345,8 +349,6 @@ function summaryText(containers, daemonUp) {
   return base
 }
 
-// Docker's own status line reads well enough; it just repeats the health the
-// row already draws, and buries a bad exit code in prose.
 function statusText(container) {
   if (!container) return ""
   if (container.up) return trim(container.status).replace(/\s*\((healthy|unhealthy|health: starting|starting)\)\s*$/i, "")
@@ -354,8 +356,6 @@ function statusText(container) {
   return trim(container.status)
 }
 
-// What it is, and where to reach it. The service name leads because four
-// services in a project can share one image.
 function subtitleText(container) {
   if (!container) return ""
   var parts = []
@@ -366,22 +366,6 @@ function subtitleText(container) {
   return line
 }
 
-// Panel.qml reassigns `containers` only when this changes: an equal-but-new
-// array rebuilds every delegate, which drops the scroll position and hover,
-// and can move a row between a click's press and release. Stats are out of it
-// on purpose — they change every poll and repaint one meter instead.
-function signatureOf(containers) {
-  var list = containers || []
-  var parts = []
-  for (var i = 0; i < list.length; i++) {
-    var c = list[i]
-    parts.push([c.id, c.state, c.exitCode, c.health, c.project, c.name].join(" "))
-  }
-  return parts.join(" ")
-}
-
-// A project with anything running is asking to be brought down; one entirely
-// stopped is asking to come up.
 function sectionAction(section) {
   if (!section || section.total === 0) return null
   if (section.runningCount > 0) return { verb: "stop", ids: section.runningIds }

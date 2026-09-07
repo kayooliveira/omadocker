@@ -6,48 +6,31 @@ import qs.Ui
 import qs.Commons
 import "Model.js" as Model
 
-// Omadocker: the bar button and the panel behind it.
-//
-// This file is the Process plumbing and the bindings. Everything that can be
-// decided without running a command — parsing, grouping, sorting, the text on
-// a row — lives in Model.js, which is the half tests/ covers. See
-// ARCHITECTURE.md.
 Panel {
   id: root
 
   moduleName: "kayooliveira.omadocker"
   ipcTarget: "kayooliveira.omadocker"
-  // manageIpc: false so this file can own the single IpcHandler the target
-  // permits, and add refresh() to the open/close/toggle the base provides.
   manageIpc: false
-
-  // ---------------------------------------------------------------- settings
 
   readonly property int refreshIntervalSec: Math.max(5, Number(setting("refreshIntervalSec", 15)))
   readonly property bool showStopped: setting("showStopped", true) === true
   readonly property bool showStats: setting("showStats", true) === true
   readonly property bool hideWhenEmpty: setting("hideWhenEmpty", false) === true
 
-  // ------------------------------------------------------------------- state
-
   property var containers: []
-  // Short id -> { cpu, cpuPercent, mem, memPercent }. Held apart from
-  // `containers` so a stats poll repaints meters without rebuilding rows.
   property var stats: ({})
-  property string signature: ""
   property bool daemonReachable: true
   property bool permissionDenied: false
   property bool loading: false
   property bool everLoaded: false
   property string filterText: ""
 
-  // Short id of the container an action is in flight for, or "" — the row it
-  // names disables its buttons until Docker answers, so a double click cannot
-  // queue a stop behind a start.
   property string pendingId: ""
 
   property int cursorIndex: 0
   property bool cursorActive: false
+  property bool cursorFromKeyboard: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.5)
@@ -57,10 +40,37 @@ Panel {
   readonly property var sections: Model.sectionsFor(visibleContainers)
   readonly property var rows: Model.rowsFor(sections)
   readonly property var counts: Model.counts(containers)
-  readonly property var cursorContainer: Model.containerAtCursor(rows, cursorIndex)
+  readonly property var cursorContainer: Model.containerAtCursor(containers, rows, cursorIndex)
   readonly property bool filterable: containers.length > 6
 
-  // ----------------------------------------------------------------- polling
+  ListModel { id: rowModel }
+
+  function syncRows() {
+    var next = root.rows
+    var keys = []
+    for (var i = 0; i < rowModel.count; i++) keys.push(rowModel.get(i).key)
+
+    var ops = Model.reconcilePlan(keys, next)
+    for (var o = 0; o < ops.length; o++) {
+      var op = ops[o]
+      if (op.op === "remove") rowModel.remove(op.index)
+      else if (op.op === "move") rowModel.move(op.from, op.to, 1)
+      else rowModel.insert(op.index, op.row)
+    }
+
+    for (var n = 0; n < next.length; n++) {
+      var current = rowModel.get(n)
+      for (var f = 0; f < Model.ROW_FIELDS.length; f++) {
+        var field = Model.ROW_FIELDS[f]
+        if (current[field] !== next[n][field]) rowModel.setProperty(n, field, next[n][field])
+      }
+    }
+
+    root.cursorIndex = Model.clampCursor(root.cursorIndex, rowModel.count)
+  }
+
+  onRowsChanged: syncRows()
+  Component.onCompleted: syncRows()
 
   function refresh() {
     if (listProcess.running) return
@@ -74,10 +84,6 @@ Panel {
     statsProcess.running = true
   }
 
-  // The bar polls on the user's interval whether or not the panel is open,
-  // because the glyph is the whole point of the widget when it is closed. The
-  // panel polls faster while it is open, since that is when someone is
-  // watching a container come up.
   Timer {
     interval: root.refreshIntervalSec * 1000
     running: true
@@ -93,10 +99,6 @@ Panel {
     onTriggered: root.refresh()
   }
 
-  // `docker stats --no-stream` samples every running container over a full
-  // second before it prints, so it is an order of magnitude more expensive
-  // than `docker ps` and gets a slower timer of its own rather than riding
-  // along with the list.
   Timer {
     interval: 5000
     running: root.opened && root.showStats
@@ -116,8 +118,6 @@ Panel {
     }
   }
 
-  // ----------------------------------------------------------------- actions
-
   function runAction(ids, verb) {
     if (!ids || ids.length === 0 || actionProcess.running) return
     root.pendingId = ids.length === 1 ? ids[0] : ""
@@ -134,8 +134,8 @@ Panel {
     if (container && container.up) runAction([container.id], "restart")
   }
 
-  function toggleSection(section) {
-    var action = Model.sectionAction(section)
+  function toggleSection(sectionKey) {
+    var action = Model.sectionAction(Model.sectionByKey(sections, sectionKey))
     if (action) runAction(action.ids, action.verb)
   }
 
@@ -147,8 +147,6 @@ Panel {
     runAction(ids, "stop")
   }
 
-  // Arguments, not `sh -c`: a container name is user-supplied text and the
-  // only safe way to hand it to a process is as its own argv entry.
   function copyText(value) {
     if (!value || copyProcess.running) return
     copyProcess.command = ["wl-copy", "--trim-newline", String(value)]
@@ -167,17 +165,17 @@ Panel {
     Quickshell.execDetached(["omarchy-launch-or-focus-tui", "lazydocker"])
   }
 
-  // ---------------------------------------------------------------- keyboard
-
   function moveCursor(delta) {
-    if (rows.length === 0) return
+    if (rowModel.count === 0) return
     cursorActive = true
-    cursorIndex = Model.clampCursor(cursorIndex + delta, rows.length)
+    cursorFromKeyboard = true
+    cursorIndex = Model.clampCursor(cursorIndex + delta, rowModel.count)
   }
 
   function setCursor(index) {
     cursorActive = true
-    cursorIndex = Model.clampCursor(index, rows.length)
+    cursorFromKeyboard = false
+    cursorIndex = Model.clampCursor(index, rowModel.count)
   }
 
   function handleTextKey(key) {
@@ -191,11 +189,6 @@ Panel {
     else if (key === "n") copyText(cursorContainer.name)
   }
 
-  // --------------------------------------------------------------- processes
-
-  // `{{json .}}` rather than a hand-built format string: Docker does its own
-  // escaping, so an image or label containing a quote stays valid JSON instead
-  // of silently truncating the list at that container.
   Process {
     id: listProcess
     command: root.showStopped
@@ -211,14 +204,8 @@ Panel {
       if (code !== 0) {
         var message = String(listErr.text || "")
         root.daemonReachable = false
-        // Two different failures with two different fixes, and telling them
-        // apart is the difference between a useful empty state and a shrug.
-        // Omarchy leaves accounts out of the root-equivalent docker group by
-        // default, so "permission denied" is the common case on a fresh
-        // install and has a one-command remedy.
         root.permissionDenied = /permission denied|dial unix|connect: permission/i.test(message)
         root.containers = []
-        root.signature = ""
         root.stats = ({})
         return
       }
@@ -226,16 +213,7 @@ Panel {
       root.daemonReachable = true
       root.permissionDenied = false
 
-      var parsed = Model.normalizeContainers(Model.parseJsonLines(listOut.text))
-      var next = Model.signatureOf(parsed)
-      // Only swap the array when something the list is laid out from actually
-      // changed. See Model.signatureOf.
-      if (next !== root.signature) {
-        root.signature = next
-        root.containers = parsed
-        root.cursorIndex = Model.clampCursor(root.cursorIndex, root.rows.length)
-      }
-
+      root.containers = Model.normalizeContainers(Model.parseJsonLines(listOut.text))
       root.refreshStats()
     }
   }
@@ -272,17 +250,9 @@ Panel {
     function stopAll(): void { root.stopEverything() }
   }
 
-  // -------------------------------------------------------------- bar button
-
-  // The bar sizes each widget slot from the entry point's implicit size, and
-  // Panel is a bare Item, so without this the button is laid out into a 0x0
-  // slot and never paints.
   implicitWidth: button.visible ? button.implicitWidth : 0
   implicitHeight: button.implicitHeight
 
-  // Urgent is reserved for the one thing worth interrupting a glance: a
-  // container that died badly or whose own healthcheck says it is unwell.
-  // A merely idle Docker dims instead, the way Bluetooth dims when it is off.
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -301,8 +271,6 @@ Panel {
     }
   }
 
-  // ------------------------------------------------------------------- panel
-
   KeyboardPanel {
     id: panel
     anchorItem: button
@@ -316,8 +284,6 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // The filter field owns the keyboard while it has focus; without this,
-      // typing "docker" into it would move the cursor six rows down instead.
       blocked: filterField.activeFocus
 
       onMoveRequested: function(dx, dy) {
@@ -332,8 +298,6 @@ Panel {
         id: column
         anchors.fill: parent
         spacing: Style.spacing.panelGap
-
-        // ---------- hero ----------
 
         PanelHero {
           title: "OmaDocker"
@@ -359,8 +323,6 @@ Panel {
               fontFamily: root.fontFamily
               onClicked: { root.refresh(); root.refreshStats() }
 
-              // Only while a refresh is genuinely outstanding: a spinner that
-              // never stops reads as a hang rather than as work.
               RotationAnimation on rotation {
                 running: root.loading
                 from: 0
@@ -385,10 +347,6 @@ Panel {
 
         PanelSeparator { foreground: root.foreground }
 
-        // ---------- filter ----------
-
-        // Only once the list is long enough that scanning it stops working.
-        // A filter above four rows is furniture.
         TextField {
           id: filterField
           visible: root.filterable
@@ -411,11 +369,9 @@ Panel {
           }
         }
 
-        // ---------- list ----------
-
         ListView {
           id: listView
-          visible: root.rows.length > 0
+          visible: rowModel.count > 0
           width: parent.width
           height: visible ? Math.min(contentHeight, Style.space(560)) : 0
           spacing: Style.spacing.sm
@@ -425,48 +381,45 @@ Panel {
 
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-          model: root.rows
-          // Row index and cursor index are the same number — see Model.rowsFor.
+          model: rowModel
           currentIndex: root.cursorIndex
 
-          // Deferred a turn: the model is replaced whenever the container list
-          // changes shape, and positioning against a view that is still
-          // rebuilding is a no-op that leaves the cursor off screen.
-          onCurrentIndexChanged: if (currentIndex >= 0) Qt.callLater(keepCurrentVisible)
+          onCurrentIndexChanged: {
+            if (currentIndex >= 0 && root.cursorFromKeyboard) Qt.callLater(keepCurrentVisible)
+          }
           function keepCurrentVisible() {
-            if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
+            if (currentIndex >= 0 && root.cursorFromKeyboard) positionViewAtIndex(currentIndex, ListView.Contain)
           }
 
           delegate: Column {
             id: rowGroup
-            required property var modelData
+            required property var model
             required property int index
 
             width: ListView.view.width
             spacing: Style.spacing.sm
 
             SectionHeader {
-              visible: rowGroup.modelData.sectionTitle !== ""
+              visible: rowGroup.model.sectionTitle !== ""
               height: visible ? implicitHeight : 0
               width: parent.width
-              section: rowGroup.modelData.section
-              first: rowGroup.modelData.firstSection
+              title: rowGroup.model.sectionTitle
+              sectionKey: rowGroup.model.sectionKey
+              running: rowGroup.model.sectionRunning
+              total: rowGroup.model.sectionTotal
+              first: rowGroup.model.firstSection
             }
 
             ContainerRow {
               width: parent.width
-              container: rowGroup.modelData.container
+              row: rowGroup.model
               rowIndex: rowGroup.index
             }
           }
         }
 
-        // ---------- empty states ----------
-
-        // Each of these is a different problem with a different fix, so each
-        // says which one it is rather than sharing one "nothing here" line.
         Column {
-          visible: root.rows.length === 0
+          visible: rowModel.count === 0
           width: parent.width
           spacing: Style.spacing.sm
           topPadding: Style.spacing.lg
@@ -508,17 +461,16 @@ Panel {
     }
   }
 
-  // ------------------------------------------------------------- row visuals
-
-  // Compose project header. Doubles as the project's own start/stop control,
-  // because a project is the unit people actually bring up and take down.
   component SectionHeader: Item {
     id: header
 
-    required property var section
+    required property string title
+    required property string sectionKey
+    required property int running
+    required property int total
     property bool first: false
 
-    readonly property bool anyRunning: !!section && section.runningCount > 0
+    readonly property bool anyRunning: running > 0
 
     implicitHeight: headerLabel.implicitHeight + (first ? 0 : Style.spacing.xxl)
 
@@ -533,7 +485,7 @@ Panel {
       id: headerLabel
       anchors.left: parent.left
       anchors.bottom: parent.bottom
-      text: header.section ? header.section.title.toUpperCase() : ""
+      text: header.title.toUpperCase()
       foreground: root.foreground
       fontFamily: root.fontFamily
     }
@@ -546,7 +498,7 @@ Panel {
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        text: header.section ? header.section.runningCount + "/" + header.section.total : ""
+        text: header.running + "/" + header.total
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -555,13 +507,13 @@ Panel {
       PanelActionButton {
         enabled: !actionProcess.running
         iconText: header.anyRunning ? Model.Glyph.stop : Model.Glyph.play
-        tooltipText: (header.anyRunning ? "Stop " : "Start ") + (header.section ? header.section.title : "")
+        tooltipText: (header.anyRunning ? "Stop " : "Start ") + header.title
         foreground: root.foreground
         hoverColor: header.anyRunning ? Color.urgent : root.foreground
         fontFamily: root.fontFamily
         fontSize: Style.font.iconSmall
         size: Style.space(20)
-        onClicked: root.toggleSection(header.section)
+        onClicked: root.toggleSection(header.sectionKey)
       }
     }
   }
@@ -569,28 +521,26 @@ Panel {
   component ContainerRow: CursorSurface {
     id: rowSurface
 
-    required property var container
+    required property var row
     required property int rowIndex
 
-    readonly property var containerStats: container ? root.stats[container.id] : null
-    readonly property bool busy: !!container && root.pendingId === container.id
+    readonly property var containerStats: root.stats[row.id]
+    readonly property bool busy: root.pendingId === row.id
+    readonly property var container: Model.containerById(root.containers, row.id)
 
     hasCursor: root.cursorActive && rowIndex === root.cursorIndex
     foreground: root.foreground
     implicitHeight: rowContent.implicitHeight + Style.spacing.xxl
     height: implicitHeight
 
-    // Contract of CursorSurface: hover updates the panel's cursor, and the
-    // paint follows the cursor. That is what keeps exactly one row
-    // highlighted whether the user is on the mouse or the keyboard.
     MouseArea {
       id: rowMouse
       anchors.fill: parent
       hoverEnabled: true
       acceptedButtons: Qt.LeftButton
       cursorShape: Qt.PointingHandCursor
-      onContainsMouseChanged: if (containsMouse && rowSurface.container) root.setCursor(rowSurface.rowIndex)
-      onClicked: root.copyText(rowSurface.container.id)
+      onContainsMouseChanged: if (containsMouse) root.setCursor(rowSurface.rowIndex)
+      onClicked: root.copyText(rowSurface.row.id)
     }
 
     PanelToolTip {
@@ -619,18 +569,13 @@ Panel {
           radius: width / 2
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
-          color: {
-            if (!rowSurface.container) return "transparent"
-            if (rowSurface.container.failing) return Color.urgent
-            return rowSurface.container.up ? Color.accent : "transparent"
-          }
-          border.width: rowSurface.container && !rowSurface.container.up && !rowSurface.container.failing ? 1 : 0
+          color: rowSurface.row.failing ? Color.urgent
+            : (rowSurface.row.up ? Color.accent : "transparent")
+          border.width: !rowSurface.row.up && !rowSurface.row.failing ? 1 : 0
           border.color: root.dim
 
-          // Restarting is the one state worth animating: it is the only one
-          // that resolves on its own, and a still dot cannot say so.
           SequentialAnimation on opacity {
-            running: !!rowSurface.container && rowSurface.container.state === "restarting"
+            running: rowSurface.row.restarting
             loops: Animation.Infinite
             NumberAnimation { to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
             NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
@@ -652,7 +597,7 @@ Panel {
             spacing: Style.spacing.md
 
             Text {
-              text: rowSurface.container ? rowSurface.container.name : ""
+              text: rowSurface.row.name
               textFormat: Text.PlainText
               width: Math.min(implicitWidth, parent.width - (healthGlyph.visible ? healthGlyph.implicitWidth + Style.spacing.md : 0))
               color: root.foreground
@@ -663,7 +608,7 @@ Panel {
 
             Text {
               id: healthGlyph
-              visible: !!rowSurface.container && rowSurface.container.health === "unhealthy"
+              visible: rowSurface.row.unhealthy
               anchors.verticalCenter: parent.verticalCenter
               text: Model.Glyph.unhealthy
               color: Color.urgent
@@ -674,7 +619,7 @@ Panel {
 
           Text {
             width: parent.width
-            text: Model.subtitleText(rowSurface.container)
+            text: rowSurface.row.subtitle
             textFormat: Text.PlainText
             visible: text !== ""
             color: root.dim
@@ -685,10 +630,10 @@ Panel {
 
           Text {
             width: parent.width
-            visible: !!rowSurface.container && !rowSurface.container.up
-            text: Model.statusText(rowSurface.container)
+            visible: !rowSurface.row.up
+            text: rowSurface.row.status
             textFormat: Text.PlainText
-            color: rowSurface.container && rowSurface.container.failing ? Color.urgent : root.dim
+            color: rowSurface.row.failing ? Color.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
@@ -713,7 +658,7 @@ Panel {
           }
 
           PanelActionButton {
-            visible: !!rowSurface.container && rowSurface.container.up
+            visible: rowSurface.row.up
             enabled: !rowSurface.busy && !actionProcess.running
             iconText: Model.Glyph.restart
             tooltipText: "Restart  (r)"
@@ -726,10 +671,10 @@ Panel {
 
           PanelActionButton {
             enabled: !rowSurface.busy && !actionProcess.running
-            iconText: rowSurface.container && rowSurface.container.up ? Model.Glyph.stop : Model.Glyph.play
-            tooltipText: rowSurface.container && rowSurface.container.up ? "Stop  (enter)" : "Start  (enter)"
+            iconText: rowSurface.row.up ? Model.Glyph.stop : Model.Glyph.play
+            tooltipText: rowSurface.row.up ? "Stop  (enter)" : "Start  (enter)"
             foreground: root.foreground
-            hoverColor: rowSurface.container && rowSurface.container.up ? Color.urgent : root.foreground
+            hoverColor: rowSurface.row.up ? Color.urgent : root.foreground
             fontFamily: root.fontFamily
             fontSize: Style.font.iconSmall
             size: Style.space(22)
@@ -738,11 +683,8 @@ Panel {
         }
       }
 
-      // Meters sit under the identity block rather than beside it so they
-      // keep a fixed width regardless of how long the container's name is,
-      // which is what lets two rows' bars be compared by eye.
       Row {
-        visible: root.showStats && !!rowSurface.container && rowSurface.container.up
+        visible: root.showStats && rowSurface.row.up
         width: parent.width
         spacing: Style.spacing.xxl
         leftPadding: stateDot.width + Style.spacing.xl
@@ -765,9 +707,6 @@ Panel {
     }
   }
 
-  // Glyph, a hairline track, and the reading. `percent < 0` means the stats
-  // poll has not answered yet, and the track stays empty rather than drawing a
-  // confident zero.
   component Meter: Item {
     id: meter
 
@@ -806,8 +745,6 @@ Panel {
         width: meter.known ? parent.width * meter.fraction : 0
         height: parent.height
         radius: parent.radius
-        // Urgent only once the reading is genuinely alarming. Colouring a
-        // busy-but-fine container red trains people to ignore the colour.
         color: meter.percent >= 85 ? Color.urgent : Color.accent
 
         Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
