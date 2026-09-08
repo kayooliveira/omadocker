@@ -4,6 +4,8 @@
 
 A complete, native Docker container manager for the [Omarchy](https://omarchy.org/) shell.
 
+Available on the [Omarchy Plugins directory](https://plugins.omarchy.org/plugin.html?id=kayooliveira.omadocker).
+
 Omadocker integrates directly into your Omarchy status bar, providing a beautiful and fast way to manage your Docker containers without ever opening a terminal.
 
 ![OmaDocker Panel](https://raw.githubusercontent.com/kayooliveira/omadocker/assets/docs/omadocker-panel.png)
@@ -21,7 +23,7 @@ Omadocker integrates directly into your Omarchy status bar, providing a beautifu
 
 ## Installation
 
-You can install Omadocker directly using the Omarchy plugin manager:
+Omadocker is published on the [Omarchy Plugins directory](https://plugins.omarchy.org/plugin.html?id=kayooliveira.omadocker), and you can install it directly using the Omarchy plugin manager:
 
 ```bash
 omarchy plugin add https://github.com/kayooliveira/omadocker
