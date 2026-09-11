@@ -71,6 +71,50 @@ function rowsOf(containers) {
   return Model.rowsFor(Model.sectionsFor(containers))
 }
 
+function imageRow(overrides) {
+  return Object.assign({
+    ID: "7fd8eaad6bb6",
+    Repository: "alpine",
+    Tag: "latest",
+    Size: "3.62GB",
+    CreatedSince: "7 days ago",
+    Containers: "0"
+  }, overrides || {})
+}
+
+function volumeRow(overrides) {
+  return Object.assign({
+    Name: "shop_pgdata",
+    Driver: "local",
+    Mountpoint: "/var/lib/docker/volumes/shop_pgdata/_data",
+    Labels: "com.docker.compose.project=shop,com.docker.compose.volume=pgdata",
+    Links: "N/A",
+    Size: "N/A"
+  }, overrides || {})
+}
+
+function networkRow(overrides) {
+  return Object.assign({
+    ID: "f638321f8a24",
+    Name: "shop_default",
+    Driver: "bridge",
+    Scope: "local",
+    IPv6: "false",
+    Internal: "false",
+    Labels: "com.docker.compose.project=shop"
+  }, overrides || {})
+}
+
+function dfRow(overrides) {
+  return Object.assign({
+    Type: "Images",
+    TotalCount: "43",
+    Active: "18",
+    Size: "22.18GB",
+    Reclaimable: "10.57GB (47%)"
+  }, overrides || {})
+}
+
 module.exports = {
   test: test,
   eq: assert.deepStrictEqual,
@@ -80,5 +124,9 @@ module.exports = {
   container: container,
   make: make,
   rowsOf: rowsOf,
+  imageRow: imageRow,
+  volumeRow: volumeRow,
+  networkRow: networkRow,
+  dfRow: dfRow,
   Model: Model
 }

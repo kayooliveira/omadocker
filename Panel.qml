@@ -16,17 +16,39 @@ Panel {
   readonly property int refreshIntervalSec: Math.max(5, Number(setting("refreshIntervalSec", 15)))
   readonly property bool showStopped: setting("showStopped", true) === true
   readonly property bool showStats: setting("showStats", true) === true
+  readonly property bool showVolumeSizes: setting("showVolumeSizes", true) === true
   readonly property bool hideWhenEmpty: setting("hideWhenEmpty", false) === true
+  // The setting reads "Containers"; the tab keys are lowercase.
+  readonly property string defaultTab: {
+    var key = String(setting("defaultTab", "containers")).toLowerCase()
+    return Model.isTabKey(key) ? key : "containers"
+  }
+
+  // ------------------------------------------------------------------ state
+
+  property string tab: "containers"
 
   property var containers: []
+  property var images: []
+  property var volumes: []
+  property var networks: []
+  property var volumeSizes: []
+  property var usage: ({})
   property var stats: ({})
+
   property bool daemonReachable: true
   property bool permissionDenied: false
   property bool loading: false
   property bool everLoaded: false
   property string filterText: ""
+  property string lastError: ""
 
   property string pendingId: ""
+  property var pendingCommand: null
+  property string confirmMessage: ""
+  property string confirmLabel: "Remove"
+  property bool confirmOpen: false
+  property bool helpOpen: false
 
   property int cursorIndex: 0
   property bool cursorActive: false
@@ -36,45 +58,68 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.5)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property var visibleContainers: Model.filterContainers(containers, filterText)
-  readonly property var sections: Model.sectionsFor(visibleContainers)
-  readonly property var rows: Model.rowsFor(sections)
+  // ------------------------------------------------------------- derivation
+
+  // `docker system df -v` is the only source for what a volume costs, and it
+  // arrives on its own schedule, so it is folded in here rather than stored.
+  readonly property var sizedVolumes: Model.mergeVolumeUsage(volumes, volumeSizes)
+
+  readonly property var items: {
+    if (tab === "images") return images
+    if (tab === "volumes") return sizedVolumes
+    if (tab === "networks") return networks
+    return containers
+  }
+  readonly property var visibleItems: tab === "containers"
+    ? Model.filterContainers(containers, filterText)
+    : Model.filterResources(items, filterText)
+  readonly property var sections: tab === "containers"
+    ? Model.sectionsFor(visibleItems)
+    : Model.usageSectionsFor(visibleItems)
+  readonly property var rows: Model.rowsForSections(sections, tab)
+
   readonly property var counts: Model.counts(containers)
-  readonly property var cursorContainer: Model.containerAtCursor(containers, rows, cursorIndex)
-  readonly property bool filterable: containers.length > 6
+  readonly property var tabCounts: ({
+    containers: containers.length,
+    images: images.length,
+    volumes: volumes.length,
+    networks: networks.length
+  })
 
-  ListModel { id: rowModel }
+  readonly property var cursorRow: cursorIndex >= 0 && cursorIndex < rows.length ? rows[cursorIndex] : null
+  readonly property var cursorItem: cursorRow ? Model.itemById(items, cursorRow.id) : null
+  // The field is always on screen. Hiding it below a row count meant `/` had
+  // nothing to focus on a short list, which left the filter mouse-only — and
+  // a control you can only reach with the mouse is not a control everyone has.
+  readonly property bool filterable: true
 
-  function syncRows() {
-    var next = root.rows
-    var keys = []
-    for (var i = 0; i < rowModel.count; i++) keys.push(rowModel.get(i).key)
+  readonly property string usageLine: Model.usageText(usage, tab, items)
+  readonly property bool prunable: Model.canPrune(tab, usage, items)
 
-    var ops = Model.reconcilePlan(keys, next)
-    for (var o = 0; o < ops.length; o++) {
-      var op = ops[o]
-      if (op.op === "remove") rowModel.remove(op.index)
-      else if (op.op === "move") rowModel.move(op.from, op.to, 1)
-      else rowModel.insert(op.index, op.row)
-    }
+  onRowsChanged: root.cursorIndex = Model.clampCursor(root.cursorIndex, rows.length)
 
-    for (var n = 0; n < next.length; n++) {
-      var current = rowModel.get(n)
-      for (var f = 0; f < Model.ROW_FIELDS.length; f++) {
-        var field = Model.ROW_FIELDS[f]
-        if (current[field] !== next[n][field]) rowModel.setProperty(n, field, next[n][field])
-      }
-    }
+  // ------------------------------------------------------------------- tabs
 
-    root.cursorIndex = Model.clampCursor(root.cursorIndex, rowModel.count)
+  function setTab(key) {
+    if (!Model.isTabKey(key) || key === root.tab) return
+    // Empty the list before the rows underneath it change, so the new tab is
+    // inserted into an empty model rather than diffed against the old one.
+    list.clear()
+    root.tab = key
+    root.filterText = ""
+    root.cursorIndex = 0
+    root.cursorActive = false
+    root.lastError = ""
+    filterField.text = ""
+    refreshResources()
+    refreshUsage()
   }
 
-  onRowsChanged: syncRows()
-  Component.onCompleted: syncRows()
+  // --------------------------------------------------------------- refresh
 
   function refresh() {
     if (listProcess.running) return
-    loading = true
+    root.loading = true
     listProcess.running = true
   }
 
@@ -82,6 +127,38 @@ Panel {
     if (!showStats || statsProcess.running || !opened) return
     if (counts.running === 0) return
     statsProcess.running = true
+  }
+
+  // All three lists, not just the one on screen: the tab strip carries a count
+  // for each of them, and a count that only appears once you visit the tab is
+  // not a count, it is a surprise. Each of these is a single cheap daemon
+  // query — the expensive one is refreshVolumeSizes below, which stays lazy.
+  function refreshResources() {
+    if (!opened) return
+    if (!imagesProcess.running) imagesProcess.running = true
+    if (!volumesProcess.running) volumesProcess.running = true
+    if (!networksProcess.running) networksProcess.running = true
+    if (root.tab === "volumes") refreshVolumeSizes()
+  }
+
+  function refreshUsage() {
+    if (!opened || usageProcess.running) return
+    usageProcess.running = true
+  }
+
+  // Deliberately off every timer. Asking the daemon to walk every volume on
+  // disk takes a second or two, so it runs when the tab is opened and after
+  // something has changed, and never once a second in the background.
+  function refreshVolumeSizes() {
+    if (!showVolumeSizes || !opened || volumeSizeProcess.running) return
+    volumeSizeProcess.running = true
+  }
+
+  function refreshAll() {
+    refresh()
+    refreshStats()
+    refreshResources()
+    refreshUsage()
   }
 
   Timer {
@@ -107,22 +184,49 @@ Panel {
     onTriggered: root.refreshStats()
   }
 
+  // Images, volumes and networks change when someone changes them, not on
+  // their own, so they get a far lazier beat than the container list.
+  Timer {
+    interval: 10000
+    running: root.opened
+    repeat: true
+    onTriggered: { root.refreshResources(); root.refreshUsage() }
+  }
+
   onOpenedChanged: {
     if (opened) {
       cursorActive = false
       cursorIndex = 0
       filterText = ""
-      refresh()
+      filterField.text = ""
+      lastError = ""
+      helpOpen = false
+      closeConfirm()
+      if (root.tab !== root.defaultTab) {
+        list.clear()
+        root.tab = root.defaultTab
+      }
+      refreshAll()
     } else {
       stats = ({})
+      helpOpen = false
+      closeConfirm()
     }
+  }
+
+  // --------------------------------------------------------------- actions
+
+  function runCommand(command) {
+    if (!command || actionProcess.running) return
+    root.lastError = ""
+    actionProcess.command = command
+    actionProcess.running = true
   }
 
   function runAction(ids, verb) {
     if (!ids || ids.length === 0 || actionProcess.running) return
     root.pendingId = ids.length === 1 ? ids[0] : ""
-    actionProcess.command = ["docker", verb].concat(ids)
-    actionProcess.running = true
+    runCommand(["docker", verb].concat(ids))
   }
 
   function toggleContainer(container) {
@@ -147,17 +251,85 @@ Panel {
     runAction(ids, "stop")
   }
 
+  // Every row's buttons come from Model.actionsFor, so this is the one place
+  // a verb turns into something that happens.
+  function dispatch(kind, id, verb) {
+    var item = Model.itemById(items, id)
+    if (verb === "copy") { copyText(Model.copyValue(kind, item)); return }
+    if (verb === "logs") { viewLogs(id); return }
+    if (verb === "shell") { openShell(id); return }
+    if (verb === "remove") { askRemove(kind, id); return }
+    if (verb === "start" || verb === "stop" || verb === "restart") runAction([id], verb)
+  }
+
+  function activateRow() {
+    if (!cursorActive || !cursorRow) return
+    if (root.tab === "containers") toggleContainer(cursorItem)
+    else dispatch(root.tab, cursorRow.id, "copy")
+  }
+
+  // ---------------------------------------------------------- confirmation
+
+  function ask(command, message, label) {
+    if (!command) return
+    root.pendingCommand = command
+    root.confirmMessage = message
+    root.confirmLabel = label
+    // Cancel is the default answer to every question asked here.
+    confirmDialog.selectedIndex = 0
+    root.confirmOpen = true
+  }
+
+  function askRemove(kind, id) {
+    var item = Model.itemById(items, id)
+    var command = Model.removeCommand(kind, id)
+    if (!item || !command) return
+    ask(command, Model.removeMessage(kind, item), "Remove")
+  }
+
+  function askPrune() {
+    var spec = Model.pruneSpec(root.tab)
+    if (!spec || !root.prunable) return
+    ask(spec.args, spec.message, spec.label)
+  }
+
+  function closeConfirm() {
+    root.confirmOpen = false
+    root.pendingCommand = null
+  }
+
+  function confirmAccepted() {
+    var command = root.pendingCommand
+    closeConfirm()
+    runCommand(command)
+  }
+
+  // ----------------------------------------------------------- side effects
+
   function copyText(value) {
     if (!value || copyProcess.running) return
     copyProcess.command = ["wl-copy", "--trim-newline", String(value)]
     copyProcess.running = true
   }
 
-  function viewLogs(container) {
-    if (!container) return
+  function viewLogs(id) {
+    if (!Model.isContainerId(id)) return
     root.close()
-    Quickshell.execDetached(["omarchy-launch-tui", "--app-id=org.omarchy.docker-logs", "--hold", "--",
-      "docker", "logs", "--tail", "200", "--follow", container.id])
+    // The terminal is held open by the shell, not by a launcher flag: not
+    // every omarchy-launch-tui out there understands --hold.
+    Quickshell.execDetached(["omarchy-launch-tui", "--app-id=org.omarchy.docker-logs",
+      "sh", "-c",
+      "docker logs --tail 200 --follow \"$1\"; printf '\\n[logs ended — press enter to close]'; read -r _",
+      "sh", id])
+  }
+
+  function openShell(id) {
+    if (!Model.isContainerId(id)) return
+    root.close()
+    Quickshell.execDetached(["omarchy-launch-tui", "--app-id=org.omarchy.docker-shell",
+      "sh", "-c",
+      "docker exec -it \"$1\" sh -c 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'",
+      "sh", id])
   }
 
   function launchTui() {
@@ -165,29 +337,61 @@ Panel {
     Quickshell.execDetached(["omarchy-launch-or-focus-tui", "lazydocker"])
   }
 
+  // -------------------------------------------------------------- keyboard
+
   function moveCursor(delta) {
-    if (rowModel.count === 0) return
+    // Up from the first row lands in the filter, the mirror of the Down key
+    // that walks out of it. Between the two, the whole panel is reachable
+    // without ever touching the mouse.
+    if (delta < 0 && cursorActive && cursorIndex === 0) {
+      filterField.forceActiveFocus()
+      cursorActive = false
+      return
+    }
+    if (rows.length === 0) {
+      filterField.forceActiveFocus()
+      return
+    }
     cursorActive = true
     cursorFromKeyboard = true
-    cursorIndex = Model.clampCursor(cursorIndex + delta, rowModel.count)
+    cursorIndex = Model.clampCursor(cursorIndex + delta, rows.length)
   }
 
   function setCursor(index) {
     cursorActive = true
     cursorFromKeyboard = false
-    cursorIndex = Model.clampCursor(index, rowModel.count)
+    cursorIndex = Model.clampCursor(index, rows.length)
   }
 
   function handleTextKey(key) {
-    if (key === "/" && filterable) { filterField.forceActiveFocus(); return }
-    if (key === "u") { refresh(); refreshStats(); return }
+    if (key === "?") { root.helpOpen = !root.helpOpen; return }
+    if (root.helpOpen) { root.helpOpen = false; return }
+    if (key === "/") { filterField.forceActiveFocus(); return }
+
+    var digit = "1234".indexOf(key)
+    if (digit !== -1) { setTab(Model.tabKeyAt(digit)); return }
+
+    if (key === "u") { refreshAll(); return }
     if (key === "d") { launchTui(); return }
-    if (!cursorActive || !cursorContainer) return
-    if (key === "o") viewLogs(cursorContainer)
-    else if (key === "r") restartContainer(cursorContainer)
-    else if (key === "c") copyText(cursorContainer.id)
-    else if (key === "n") copyText(cursorContainer.name)
+    if (key === "p") { askPrune(); return }
+
+    if (!cursorActive || !cursorRow) return
+    if (key === "c") { dispatch(root.tab, cursorRow.id, "copy"); return }
+
+    if (root.tab !== "containers" || !cursorItem) return
+    if (key === "o") viewLogs(cursorItem.id)
+    else if (key === "s") { if (cursorItem.up) openShell(cursorItem.id) }
+    else if (key === "r") restartContainer(cursorItem)
+    else if (key === "n") copyText(cursorItem.name)
   }
+
+  function removeAtCursor() {
+    if (!cursorActive || !cursorRow) return
+    if (!Model.allowsVerb(cursorRow, "remove")) return
+    askRemove(root.tab, cursorRow.id)
+  }
+
+  // -------------------------------------------------------------- processes
 
   Process {
     id: listProcess
@@ -206,6 +410,11 @@ Panel {
         root.daemonReachable = false
         root.permissionDenied = /permission denied|dial unix|connect: permission/i.test(message)
         root.containers = []
+        root.images = []
+        root.volumes = []
+        root.networks = []
+        root.volumeSizes = []
+        root.usage = ({})
         root.stats = ({})
         return
       }
@@ -229,10 +438,79 @@ Panel {
   }
 
   Process {
+    id: imagesProcess
+    command: ["sh", "-c", "docker images --format '{{json .}}' | head -c 1M"]
+    stdout: StdioCollector { id: imagesOut; waitForEnd: true }
+
+    onExited: function(code) {
+      if (code === 0) root.images = Model.normalizeImages(Model.parseJsonLines(imagesOut.text))
+    }
+  }
+
+  // One shell, two questions: the whole list, then the names `prune` would
+  // take. Docker decides what counts as unused, so the panel never has to.
+  Process {
+    id: volumesProcess
+    command: ["sh", "-c",
+      "{ docker volume ls --format '{{json .}}'; echo '#UNUSED'; " +
+      "docker volume ls --filter dangling=true --format '{{.Name}}'; } | head -c 1M"]
+    stdout: StdioCollector { id: volumesOut; waitForEnd: true }
+
+    onExited: function(code) {
+      if (code !== 0) return
+      var parsed = Model.parseTagged(volumesOut.text)
+      root.volumes = Model.normalizeVolumes(parsed.records, parsed.unused)
+    }
+  }
+
+  Process {
+    id: networksProcess
+    command: ["sh", "-c",
+      "{ docker network ls --format '{{json .}}'; echo '#UNUSED'; " +
+      "docker network ls --filter dangling=true --format '{{.Name}}'; } | head -c 1M"]
+    stdout: StdioCollector { id: networksOut; waitForEnd: true }
+
+    onExited: function(code) {
+      if (code !== 0) return
+      var parsed = Model.parseTagged(networksOut.text)
+      root.networks = Model.normalizeNetworks(parsed.records, parsed.unused)
+    }
+  }
+
+  Process {
+    id: usageProcess
+    command: ["sh", "-c", "docker system df --format '{{json .}}' | head -c 64k"]
+    stdout: StdioCollector { id: usageOut; waitForEnd: true }
+
+    onExited: function(code) {
+      if (code === 0) root.usage = Model.indexUsage(Model.parseJsonLines(usageOut.text))
+    }
+  }
+
+  Process {
+    id: volumeSizeProcess
+    command: ["sh", "-c", "docker system df -v --format '{{json .Volumes}}' | head -c 1M"]
+    stdout: StdioCollector { id: volumeSizeOut; waitForEnd: true }
+
+    onExited: function(code) {
+      if (code === 0) root.volumeSizes = Model.parseJsonArray(volumeSizeOut.text)
+    }
+  }
+
+  Process {
     id: actionProcess
-    onExited: {
+    stderr: StdioCollector { id: actionErr; waitForEnd: true }
+
+    onExited: function(code) {
       root.pendingId = ""
+      // Docker refuses plenty of reasonable-looking requests — a volume still
+      // mounted, an image still referenced — and its reason is the only
+      // useful thing the panel can say, so it says it verbatim.
+      if (code !== 0) root.lastError = Model.errorText(actionErr.text)
       root.refresh()
+      root.refreshResources()
+      root.refreshUsage()
+      if (root.tab === "volumes") root.volumeSizes = []
     }
   }
 
@@ -246,9 +524,12 @@ Panel {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function refresh(): void { root.refresh() }
+    function refresh(): void { root.refreshAll() }
     function stopAll(): void { root.stopEverything() }
+    function tab(name: string): void { root.setTab(name) }
   }
+
+  // ------------------------------------------------------------------- bar
 
   implicitWidth: button.visible ? button.implicitWidth : 0
   implicitHeight: button.implicitHeight
@@ -271,6 +552,8 @@ Panel {
     }
   }
 
+  // ----------------------------------------------------------------- panel
+
   KeyboardPanel {
     id: panel
     anchorItem: button
@@ -278,491 +561,323 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(420))
+    contentWidth: panel.fittedContentWidth(Style.space(470))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
-    PanelKeyCatcher {
-      id: keyCatcher
+    // The confirmation lives outside PanelKeyCatcher on purpose: the catcher
+    // goes `blocked` while a question is open, so the unhandled key bubbles
+    // out to here and the dialog answers it.
+    Item {
+      id: keyRoot
       anchors.fill: parent
-      blocked: filterField.activeFocus
 
-      onMoveRequested: function(dx, dy) {
-        if (dy !== 0) root.moveCursor(dy)
+      Keys.onPressed: function(event) {
+        if (!root.confirmOpen) return
+        if (confirmDialog.handleKey(event)) event.accepted = true
       }
-      onActivateRequested: if (root.cursorActive) root.toggleContainer(root.cursorContainer)
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(text) { root.handleTextKey(text) }
 
-      Column {
-        id: column
+      PanelKeyCatcher {
+        id: keyCatcher
         anchors.fill: parent
-        spacing: Style.spacing.panelGap
+        blocked: filterField.activeFocus || root.confirmOpen
 
-        PanelHero {
-          title: "OmaDocker"
-          meta: Model.summaryText(root.containers, root.daemonReachable)
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          iconOpacity: root.counts.running > 0 ? 1.0 : 0.5
+        onMoveRequested: function(dx, dy) {
+          if (root.helpOpen) return
+          if (dy !== 0) root.moveCursor(dy)
+          else if (dx !== 0) root.setTab(Model.shiftTab(root.tab, dx))
+        }
+        onActivateRequested: if (root.helpOpen) root.helpOpen = false; else root.activateRow()
+        onDeleteRequested: if (!root.helpOpen) root.removeAtCursor()
+        onCloseRequested: {
+          if (root.helpOpen) root.helpOpen = false
+          else root.close()
+        }
+        onTabRequested: function(direction) { root.switchPanel(direction) }
+        onTextKey: function(text) { root.handleTextKey(text) }
 
-          iconComponent: Text {
-            text: Model.Glyph.docker
-            color: root.counts.alerting > 0 ? Color.urgent : root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.display
-          }
+        Column {
+          id: column
+          anchors.fill: parent
+          spacing: Style.spacing.panelGap
 
-          trailingControl: Row {
-            spacing: Style.spacing.sm
+          PanelHero {
+            title: "OmaDocker"
+            meta: Model.summaryText(root.containers, root.daemonReachable)
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            iconOpacity: root.counts.running > 0 ? 1.0 : 0.5
 
-            PanelActionButton {
-              iconText: Model.Glyph.refresh
-              tooltipText: "Refresh  (u)"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: { root.refresh(); root.refreshStats() }
+            iconComponent: Text {
+              text: Model.Glyph.docker
+              color: root.counts.alerting > 0 ? Color.urgent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+            }
 
-              RotationAnimation on rotation {
-                running: root.loading
-                from: 0
-                to: 360
-                duration: 900
-                loops: Animation.Infinite
-                onRunningChanged: if (!running) rotation = 0
+            trailingControl: Row {
+              spacing: Style.spacing.sm
+
+              PanelActionButton {
+                iconText: Model.Glyph.keyboard
+                tooltipText: "Keyboard shortcuts  (?)"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.helpOpen = !root.helpOpen
+              }
+
+              PanelActionButton {
+                iconText: Model.Glyph.refresh
+                tooltipText: "Refresh  (u)"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.refreshAll()
+
+                RotationAnimation on rotation {
+                  running: root.loading
+                  from: 0
+                  to: 360
+                  duration: 900
+                  loops: Animation.Infinite
+                  onRunningChanged: if (!running) rotation = 0
+                }
+              }
+
+              PanelActionButton {
+                visible: root.tab === "containers" && root.counts.running > 0
+                iconText: Model.Glyph.stop
+                tooltipText: "Stop every running container"
+                foreground: root.foreground
+                hoverColor: Color.urgent
+                fontFamily: root.fontFamily
+                onClicked: root.stopEverything()
               }
             }
+          }
 
-            PanelActionButton {
-              visible: root.counts.running > 0
-              iconText: Model.Glyph.stop
-              tooltipText: "Stop every running container"
-              foreground: root.foreground
-              hoverColor: Color.urgent
-              fontFamily: root.fontFamily
-              onClicked: root.stopEverything()
+          TabStrip {
+            width: parent.width
+            current: root.tab
+            counts: root.tabCounts
+            alerting: root.counts.alerting > 0
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onSelected: function(key) { root.setTab(key) }
+          }
+
+          TextField {
+            id: filterField
+            width: parent.width
+            foreground: root.foreground
+            // The operator stays on the first line: a line that ends on a
+            // complete expression gets a semicolon inserted for it, and the
+            // rest of the binding is quietly dropped.
+            placeholderText: Model.Glyph.search + "  Filter " + Model.tabNoun(root.tab) + "s" +
+              (activeFocus ? "" : "   /")
+            onTextChanged: {
+              root.filterText = text
+              root.cursorIndex = 0
+            }
+            Keys.onEscapePressed: {
+              if (text.length > 0) text = ""
+              else keyCatcher.forceActiveFocus()
+            }
+            Keys.onDownPressed: {
+              keyCatcher.forceActiveFocus()
+              root.moveCursor(0)
             }
           }
-        }
 
-        PanelSeparator { foreground: root.foreground }
+          ResourceList {
+            id: list
+            width: parent.width
+            rows: root.rows
+            kind: root.tab
+            stats: root.stats
+            showStats: root.showStats
+            busy: actionProcess.running
+            pendingId: root.pendingId
+            cursorIndex: root.cursorIndex
+            cursorActive: root.cursorActive
+            cursorFromKeyboard: root.cursorFromKeyboard
+            foreground: root.foreground
+            fontFamily: root.fontFamily
 
-        TextField {
-          id: filterField
-          visible: root.filterable
-          height: visible ? implicitHeight : 0
-          width: parent.width
-          foreground: root.foreground
-          placeholderText: Model.Glyph.search + "  Filter containers"
-          text: root.filterText
-          onTextChanged: {
-            root.filterText = text
-            root.cursorIndex = 0
-          }
-          Keys.onEscapePressed: {
-            if (text.length > 0) text = ""
-            else keyCatcher.forceActiveFocus()
-          }
-          Keys.onDownPressed: {
-            keyCatcher.forceActiveFocus()
-            root.moveCursor(0)
-          }
-        }
-
-        ListView {
-          id: listView
-          visible: rowModel.count > 0
-          width: parent.width
-          height: visible ? Math.min(contentHeight, Style.space(560)) : 0
-          spacing: Style.spacing.sm
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
-          interactive: contentHeight > height
-
-          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-          model: rowModel
-          currentIndex: root.cursorIndex
-
-          onCurrentIndexChanged: {
-            if (currentIndex >= 0 && root.cursorFromKeyboard) Qt.callLater(keepCurrentVisible)
-          }
-          function keepCurrentVisible() {
-            if (currentIndex >= 0 && root.cursorFromKeyboard) positionViewAtIndex(currentIndex, ListView.Contain)
+            onActionRequested: function(kind, id, verb) { root.dispatch(kind, id, verb) }
+            onRowClicked: function(id) { root.dispatch(root.tab, id, "copy") }
+            onSectionToggled: function(key) { root.toggleSection(key) }
+            onCursorRequested: function(index) { root.setCursor(index) }
           }
 
-          delegate: Column {
-            id: rowGroup
-            required property var model
-            required property int index
-
-            width: ListView.view.width
+          Column {
+            visible: list.count === 0
+            width: parent.width
             spacing: Style.spacing.sm
-
-            SectionHeader {
-              visible: rowGroup.model.sectionTitle !== ""
-              height: visible ? implicitHeight : 0
-              width: parent.width
-              title: rowGroup.model.sectionTitle
-              sectionKey: rowGroup.model.sectionKey
-              running: rowGroup.model.sectionRunning
-              total: rowGroup.model.sectionTotal
-              first: rowGroup.model.firstSection
-            }
-
-            ContainerRow {
-              width: parent.width
-              row: rowGroup.model
-              rowIndex: rowGroup.index
-            }
-          }
-        }
-
-        Column {
-          visible: rowModel.count === 0
-          width: parent.width
-          spacing: Style.spacing.sm
-          topPadding: Style.spacing.lg
-          bottomPadding: Style.spacing.lg
-
-          Text {
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: {
-              if (!root.everLoaded) return "Loading containers…"
-              if (root.permissionDenied) return "No access to the Docker socket"
-              if (!root.daemonReachable) return "Docker daemon unreachable"
-              if (root.containers.length > 0) return "No container matches that filter"
-              return root.showStopped ? "No containers" : "No running containers"
-            }
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            visible: text !== ""
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: {
-              if (root.permissionDenied) return "Omarchy keeps accounts out of the root-equivalent docker group.\nRun  omarchy setup security sudoless-docker  and reboot."
-              if (!root.daemonReachable && root.everLoaded) return "Start it with  sudo systemctl start docker"
-              return ""
-            }
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-            lineHeight: 1.3
-          }
-        }
-      }
-    }
-  }
-
-  component SectionHeader: Item {
-    id: header
-
-    required property string title
-    required property string sectionKey
-    required property int running
-    required property int total
-    property bool first: false
-
-    readonly property bool anyRunning: running > 0
-
-    implicitHeight: headerLabel.implicitHeight + (first ? 0 : Style.spacing.xxl)
-
-    PanelSeparator {
-      visible: !header.first
-      anchors.top: parent.top
-      anchors.topMargin: Style.spacing.lg
-      foreground: root.foreground
-    }
-
-    PanelSectionHeader {
-      id: headerLabel
-      anchors.left: parent.left
-      anchors.bottom: parent.bottom
-      text: header.title.toUpperCase()
-      textFormat: Text.PlainText
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-    }
-
-    Row {
-      anchors.right: parent.right
-      anchors.rightMargin: Style.spacing.md
-      anchors.bottom: parent.bottom
-      spacing: Style.spacing.sm
-
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        text: header.running + "/" + header.total
-        textFormat: Text.PlainText
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      PanelActionButton {
-        enabled: !actionProcess.running
-        iconText: header.anyRunning ? Model.Glyph.stop : Model.Glyph.play
-        tooltipText: (header.anyRunning ? "Stop " : "Start ") + header.title
-        foreground: root.foreground
-        hoverColor: header.anyRunning ? Color.urgent : root.foreground
-        fontFamily: root.fontFamily
-        fontSize: Style.font.iconSmall
-        size: Style.space(20)
-        onClicked: root.toggleSection(header.sectionKey)
-      }
-    }
-  }
-
-  component ContainerRow: CursorSurface {
-    id: rowSurface
-
-    required property var row
-    required property int rowIndex
-
-    readonly property var containerStats: root.stats[row.id]
-    readonly property bool busy: root.pendingId === row.id
-    readonly property var container: Model.containerById(root.containers, row.id)
-
-    hasCursor: root.cursorActive && rowIndex === root.cursorIndex
-    foreground: root.foreground
-    implicitHeight: rowContent.implicitHeight + Style.spacing.xxl
-    height: implicitHeight
-
-    MouseArea {
-      id: rowMouse
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.LeftButton
-      cursorShape: Qt.PointingHandCursor
-      onContainsMouseChanged: if (containsMouse) root.setCursor(rowSurface.rowIndex)
-      onClicked: root.copyText(rowSurface.row.id)
-    }
-
-    PanelToolTip {
-      visible: rowMouse.containsMouse
-      text: "Copy container id  (c)"
-      fontFamily: root.fontFamily
-    }
-
-    Column {
-      id: rowContent
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.spacing.xl
-      anchors.rightMargin: Style.spacing.xl
-      spacing: Style.spacing.xs
-
-      Item {
-        width: parent.width
-        implicitHeight: Math.max(identity.implicitHeight, rowActions.implicitHeight)
-
-        Rectangle {
-          id: stateDot
-          width: Style.space(7)
-          height: width
-          radius: width / 2
-          anchors.left: parent.left
-          anchors.verticalCenter: parent.verticalCenter
-          color: rowSurface.row.failing ? Color.urgent
-            : (rowSurface.row.up ? Color.accent : "transparent")
-          border.width: !rowSurface.row.up && !rowSurface.row.failing ? 1 : 0
-          border.color: root.dim
-
-          SequentialAnimation on opacity {
-            running: rowSurface.row.restarting
-            loops: Animation.Infinite
-            NumberAnimation { to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
-            NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
-            onRunningChanged: if (!running) rowSurface.opacity = 1
-          }
-        }
-
-        Column {
-          id: identity
-          anchors.left: stateDot.right
-          anchors.leftMargin: Style.spacing.xl
-          anchors.right: rowActions.left
-          anchors.rightMargin: Style.spacing.lg
-          anchors.verticalCenter: parent.verticalCenter
-          spacing: Style.spacing.xxs
-
-          Row {
-            width: parent.width
-            spacing: Style.spacing.md
+            topPadding: Style.spacing.lg
+            bottomPadding: Style.spacing.lg
 
             Text {
-              text: rowSurface.row.name
-              textFormat: Text.PlainText
-              width: Math.min(implicitWidth, parent.width - (healthGlyph.visible ? healthGlyph.implicitWidth + Style.spacing.md : 0))
-              color: root.foreground
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: Model.emptyText(root.tab, {
+                everLoaded: root.everLoaded,
+                daemonReachable: root.daemonReachable,
+                permissionDenied: root.permissionDenied,
+                filtered: root.items.length > 0,
+                showStopped: root.showStopped
+              })
+              color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
-              elide: Text.ElideRight
+              wrapMode: Text.WordWrap
             }
 
             Text {
-              id: healthGlyph
-              visible: rowSurface.row.unhealthy
-              anchors.verticalCenter: parent.verticalCenter
-              text: Model.Glyph.unhealthy
+              visible: text !== ""
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: {
+                if (root.permissionDenied) return "Omarchy keeps accounts out of the root-equivalent docker group.\nRun  omarchy setup security sudoless-docker  and reboot."
+                if (!root.daemonReachable && root.everLoaded) return "Start it with  sudo systemctl start docker"
+                return ""
+              }
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              lineHeight: 1.3
+            }
+          }
+
+          // Docker's refusals are more useful than anything the panel could
+          // invent, so they get their own line until the user dismisses them.
+          Item {
+            width: parent.width
+            visible: root.lastError !== ""
+            implicitHeight: visible ? Math.max(errorText.implicitHeight, errorDismiss.height) : 0
+            height: implicitHeight
+
+            Text {
+              id: errorGlyph
+              anchors.left: parent.left
+              anchors.top: parent.top
+              text: Model.Glyph.alert
+              textFormat: Text.PlainText
               color: Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.iconSmall
             }
+
+            Text {
+              id: errorText
+              anchors.left: errorGlyph.right
+              anchors.leftMargin: Style.spacing.md
+              anchors.right: errorDismiss.left
+              anchors.rightMargin: Style.spacing.md
+              anchors.top: parent.top
+              text: root.lastError
+              textFormat: Text.PlainText
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            PanelActionButton {
+              id: errorDismiss
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.topMargin: -Style.spacing.xs
+              iconText: Model.Glyph.close
+              tooltipText: "Dismiss"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.iconSmall
+              size: Style.space(20)
+              onClicked: root.lastError = ""
+            }
           }
 
-          Text {
+          PanelSeparator { foreground: root.foreground }
+
+          Item {
             width: parent.width
-            text: rowSurface.row.subtitle
-            textFormat: Text.PlainText
-            visible: text !== ""
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
+            implicitHeight: Math.max(usageRow.implicitHeight, pruneButton.implicitHeight)
+            height: implicitHeight
 
-          Text {
-            width: parent.width
-            visible: !rowSurface.row.up
-            text: rowSurface.row.status
-            textFormat: Text.PlainText
-            color: rowSurface.row.failing ? Color.urgent : root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
-        }
+            Row {
+              id: usageRow
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.right: pruneButton.left
+              anchors.rightMargin: Style.spacing.md
+              spacing: Style.spacing.md
 
-        Row {
-          id: rowActions
-          anchors.right: parent.right
-          anchors.rightMargin: Style.spacing.md
-          anchors.verticalCenter: parent.verticalCenter
-          spacing: Style.spacing.xxs
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: Model.Glyph.disk
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.iconSmall
+              }
 
-          PanelActionButton {
-            iconText: Model.Glyph.logs
-            tooltipText: "Follow logs in a terminal  (o)"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.iconSmall
-            size: Style.space(22)
-            onClicked: root.viewLogs(rowSurface.container)
-          }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.min(implicitWidth, usageRow.width - Style.space(20))
+                text: root.usageLine
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+            }
 
-          PanelActionButton {
-            visible: rowSurface.row.up
-            enabled: !rowSurface.busy && !actionProcess.running
-            iconText: Model.Glyph.restart
-            tooltipText: "Restart  (r)"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.iconSmall
-            size: Style.space(22)
-            onClicked: root.restartContainer(rowSurface.container)
-          }
-
-          PanelActionButton {
-            enabled: !rowSurface.busy && !actionProcess.running
-            iconText: rowSurface.row.up ? Model.Glyph.stop : Model.Glyph.play
-            tooltipText: rowSurface.row.up ? "Stop  (enter)" : "Start  (enter)"
-            foreground: root.foreground
-            hoverColor: rowSurface.row.up ? Color.urgent : root.foreground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.iconSmall
-            size: Style.space(22)
-            onClicked: root.toggleContainer(rowSurface.container)
+            Button {
+              id: pruneButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              enabled: root.prunable && !actionProcess.running
+              bordered: true
+              iconText: Model.Glyph.prune
+              iconSize: Style.font.iconSmall
+              text: Model.pruneSpec(root.tab) ? Model.pruneSpec(root.tab).label : ""
+              tooltipText: "Reclaim what nothing is using  (p)"
+              foreground: root.prunable ? root.foreground : root.dim
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              verticalPadding: Style.spacing.xs
+              opacity: root.prunable ? 1.0 : 0.5
+              onClicked: root.askPrune()
+            }
           }
         }
       }
 
-      Row {
-        visible: root.showStats && rowSurface.row.up
-        width: parent.width
-        spacing: Style.spacing.xxl
-        leftPadding: stateDot.width + Style.spacing.xl
-        topPadding: Style.spacing.xs
-
-        Meter {
-          width: (rowContent.width - stateDot.width - Style.spacing.xl - Style.spacing.xxl) / 2
-          caption: "CPU"
-          percent: rowSurface.containerStats ? rowSurface.containerStats.cpuPercent : -1
-          value: rowSurface.containerStats ? rowSurface.containerStats.cpu : ""
-        }
-
-        Meter {
-          width: (rowContent.width - stateDot.width - Style.spacing.xl - Style.spacing.xxl) / 2
-          caption: "MEM"
-          percent: rowSurface.containerStats ? rowSurface.containerStats.memPercent : -1
-          value: rowSurface.containerStats ? rowSurface.containerStats.mem : ""
-        }
+      ShortcutSheet {
+        id: helpSheet
+        anchors.fill: parent
+        z: 5
+        opened: root.helpOpen
+        foreground: root.foreground
+        background: Color.popups.background
+        fontFamily: root.fontFamily
+        onDismissed: root.helpOpen = false
       }
-    }
-  }
 
-  component Meter: Item {
-    id: meter
-
-    property string caption: ""
-    property real percent: -1
-    property string value: ""
-
-    readonly property bool known: percent >= 0
-    readonly property real fraction: Math.max(0, Math.min(1, percent / 100))
-
-    implicitHeight: Math.max(meterCaption.implicitHeight, meterValue.implicitHeight)
-    height: implicitHeight
-
-    Text {
-      id: meterCaption
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-      text: meter.caption
-      textFormat: Text.PlainText
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-    }
-
-    Rectangle {
-      id: track
-      anchors.left: meterCaption.right
-      anchors.leftMargin: Style.spacing.md
-      anchors.right: meterValue.left
-      anchors.rightMargin: Style.spacing.md
-      anchors.verticalCenter: parent.verticalCenter
-      height: Style.space(3)
-      radius: height / 2
-      color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
-
-      Rectangle {
-        width: meter.known ? parent.width * meter.fraction : 0
-        height: parent.height
-        radius: parent.radius
-        color: meter.percent >= 85 ? Color.urgent : Color.accent
-
-        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+      ConfirmDialog {
+        id: confirmDialog
+        anchors.fill: parent
+        z: 10
+        opened: root.confirmOpen
+        message: root.confirmMessage
+        confirmText: root.confirmLabel
+        background: Color.popups.background
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onCanceled: root.closeConfirm()
+        onConfirmed: root.confirmAccepted()
       }
-    }
-
-    Text {
-      id: meterValue
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      text: meter.value || "—"
-      textFormat: Text.PlainText
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
     }
   }
 }

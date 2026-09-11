@@ -6,10 +6,22 @@ var Glyph = {
   stop: String.fromCodePoint(0xF04DB),
   restart: String.fromCodePoint(0xF0709),
   logs: String.fromCodePoint(0xF0219),
+  shell: String.fromCodePoint(0xF018D),
   copy: String.fromCodePoint(0xF018F),
   refresh: String.fromCodePoint(0xF0450),
   unhealthy: String.fromCodePoint(0xF05D6),
-  search: String.fromCodePoint(0xF0349)
+  search: String.fromCodePoint(0xF0349),
+  containers: String.fromCodePoint(0xF01A7),
+  images: String.fromCodePoint(0xF09FE),
+  volumes: String.fromCodePoint(0xF01BC),
+  networks: String.fromCodePoint(0xF0317),
+  remove: String.fromCodePoint(0xF0A7A),
+  prune: String.fromCodePoint(0xF00E2),
+  disk: String.fromCodePoint(0xF02CA),
+  link: String.fromCodePoint(0xF0339),
+  alert: String.fromCodePoint(0xF002A),
+  close: String.fromCodePoint(0xF0156),
+  keyboard: String.fromCodePoint(0xF030C)
 }
 
 var UNGROUPED = "\\x00ungrouped"
@@ -17,6 +29,97 @@ var UNGROUPED = "\\x00ungrouped"
 var UP_STATES = ["running", "restarting", "removing"]
 
 var MAX_FIELD = 64
+
+// ---------------------------------------------------------------- tabs
+//
+// The panel is one list renderer driven by whichever tab is active. Every
+// tab produces rows of the same shape (see ROW_FIELDS), so switching tabs
+// swaps the row source and nothing else.
+
+var TABS = [
+  { key: "containers", label: "Containers", glyph: Glyph.containers, noun: "container" },
+  { key: "images", label: "Images", glyph: Glyph.images, noun: "image" },
+  { key: "volumes", label: "Volumes", glyph: Glyph.volumes, noun: "volume" },
+  { key: "networks", label: "Networks", glyph: Glyph.networks, noun: "network" }
+]
+
+function tabIndex(key) {
+  for (var i = 0; i < TABS.length; i++) {
+    if (TABS[i].key === key) return i
+  }
+  return 0
+}
+
+function tabAt(index) {
+  return TABS[clampCursor(index, TABS.length)]
+}
+
+function tabKeyAt(index) {
+  return tabAt(index).key
+}
+
+// Wraps, so ← on the first tab lands on the last one.
+function shiftTab(key, delta) {
+  var count = TABS.length
+  var next = (tabIndex(key) + delta) % count
+  return TABS[next < 0 ? next + count : next].key
+}
+
+function isTabKey(key) {
+  for (var i = 0; i < TABS.length; i++) {
+    if (TABS[i].key === key) return true
+  }
+  return false
+}
+
+// ---------------------------------------------------------------- keys
+//
+// The one list of what the keyboard does. The panel's `?` sheet renders it,
+// and the README quotes it, so the two can never drift apart.
+
+var SHORTCUTS = [
+  { group: "Move", keys: "1 – 4", text: "Jump straight to a tab" },
+  { group: "Move", keys: "h  l  ← →", text: "Previous / next tab" },
+  { group: "Move", keys: "j  k  ↑ ↓", text: "Move the cursor down / up" },
+  { group: "Move", keys: "/", text: "Jump into the filter box" },
+  { group: "Move", keys: "k  ↑", text: "From the first row, step back up into the filter" },
+  { group: "Move", keys: "esc", text: "Leave the filter, then close the panel" },
+
+  { group: "Containers", keys: "enter", text: "Start or stop the container" },
+  { group: "Containers", keys: "r", text: "Restart it" },
+  { group: "Containers", keys: "o", text: "Follow its logs in a terminal" },
+  { group: "Containers", keys: "s", text: "Open a shell inside it" },
+  { group: "Containers", keys: "n", text: "Copy its name" },
+
+  { group: "Clean up", keys: "x", text: "Remove whatever the cursor is on" },
+  { group: "Clean up", keys: "p", text: "Prune everything unused on this tab" },
+
+  { group: "Panel", keys: "c", text: "Copy the id, or a volume's mount path" },
+  { group: "Panel", keys: "enter", text: "Copy, on the image, volume and network tabs" },
+  { group: "Panel", keys: "u", text: "Refresh now" },
+  { group: "Panel", keys: "d", text: "Open lazydocker" },
+  { group: "Panel", keys: "?", text: "Show this list" }
+]
+
+function shortcutGroups() {
+  var order = []
+  var byGroup = {}
+  for (var i = 0; i < SHORTCUTS.length; i++) {
+    var entry = SHORTCUTS[i]
+    if (!byGroup[entry.group]) {
+      byGroup[entry.group] = []
+      order.push(entry.group)
+    }
+    byGroup[entry.group].push({ keys: entry.keys, text: entry.text })
+  }
+  var out = []
+  for (var g = 0; g < order.length; g++) {
+    out.push({ title: order[g], entries: byGroup[order[g]] })
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- text
 
 function sanitize(value, maxLength) {
   var text = String(value === undefined || value === null ? "" : value)
@@ -30,17 +133,92 @@ function sanitize(value, maxLength) {
     out += ch
   }
   out = out.replace(/^\s+|\s+$/g, "")
-  if (out.length > limit) out = out.substring(0, limit - 1) + "\u2026"
+  if (out.length > limit) out = out.substring(0, limit - 1) + "…"
   return out
-}
-
-function isContainerId(value) {
-  return /^[A-Za-z0-9]{1,128}$/.test(String(value || ""))
 }
 
 function trim(value) {
   return String(value === undefined || value === null ? "" : value).replace(/^\s+|\s+$/g, "")
 }
+
+function join(parts, separator) {
+  var out = []
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] !== undefined && parts[i] !== null && String(parts[i]) !== "") out.push(String(parts[i]))
+  }
+  return out.join(separator === undefined ? " · " : separator)
+}
+
+function plural(count, noun) {
+  return count + " " + noun + (count === 1 ? "" : "s")
+}
+
+// ---------------------------------------------------------------- identifiers
+
+// Every value that reaches an argv slot goes through one of these first.
+// Docker's own naming rules are narrower than these, so anything that
+// fails here was never a real id or name to begin with.
+function isContainerId(value) {
+  return /^[A-Za-z0-9]{1,128}$/.test(String(value || ""))
+}
+
+function isVolumeName(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(String(value || ""))
+}
+
+function shortId(value) {
+  var text = trim(value).replace(/^sha256:/, "")
+  return text.length > 12 ? text.substring(0, 12) : text
+}
+
+// ---------------------------------------------------------------- sizes
+
+// Docker prints SI units almost everywhere (`docker system df`, `docker
+// images`) and IEC units in `docker stats`. Read both, print SI.
+var SIZE_UNITS = {
+  b: 1,
+  kb: 1e3, mb: 1e6, gb: 1e9, tb: 1e12, pb: 1e15,
+  kib: 1024, mib: 1048576, gib: 1073741824, tib: 1099511627776
+}
+
+var SIZE_SCALE = ["kB", "MB", "GB", "TB", "PB"]
+
+function parseSize(value) {
+  var match = String(value === undefined || value === null ? "" : value)
+    .match(/(-?\d+(?:\.\d+)?)\s*([KMGTP]?i?B)/i)
+  if (!match) return -1
+  var amount = Number(match[1])
+  if (!isFinite(amount) || amount < 0) return -1
+  var unit = SIZE_UNITS[match[2].toLowerCase()]
+  // Bytes are whole numbers; 1.07 * 1e9 in binary floating point is not.
+  return unit === undefined ? -1 : Math.round(amount * unit)
+}
+
+function formatSize(bytes) {
+  if (typeof bytes !== "number" || !isFinite(bytes) || bytes < 0) return ""
+  if (bytes < 1000) return Math.round(bytes) + " B"
+  var value = bytes
+  var index = -1
+  while (value >= 1000 && index < SIZE_SCALE.length - 1) {
+    value /= 1000
+    index++
+  }
+  var digits = value >= 100 ? 0 : (value >= 10 ? 1 : 2)
+  return value.toFixed(digits) + " " + SIZE_SCALE[index]
+}
+
+function sumSizes(list) {
+  var total = -1
+  var items = list || []
+  for (var i = 0; i < items.length; i++) {
+    var bytes = items[i] ? items[i].sizeBytes : -1
+    if (typeof bytes !== "number" || bytes < 0) continue
+    total = (total < 0 ? 0 : total) + bytes
+  }
+  return total
+}
+
+// ---------------------------------------------------------------- parsing
 
 function parseJsonLines(raw) {
   var lines = String(raw || "").split("\n")
@@ -56,6 +234,57 @@ function parseJsonLines(raw) {
   return out
 }
 
+// `docker system df -v` answers with one JSON array on one line, unlike
+// every other query here, which answers with one object per line.
+function parseJsonArray(raw) {
+  var text = trim(raw)
+  if (text.charAt(0) !== "[") return []
+  try {
+    var parsed = JSON.parse(text)
+    return Array.isArray(parsed) ? parsed : []
+  } catch (e) {
+    return []
+  }
+}
+
+// The volume and network queries ask Docker twice in one shell — the full
+// list, then the names `prune` would take — and separate the two answers
+// with this marker. One process instead of two, and the "is it unused?"
+// verdict comes from Docker rather than from us guessing at it.
+var UNUSED_MARK = "#UNUSED"
+
+function parseTagged(raw) {
+  var lines = String(raw || "").split("\n")
+  var records = []
+  var unused = []
+  var inUnused = false
+  for (var i = 0; i < lines.length; i++) {
+    var line = trim(lines[i])
+    if (line === UNUSED_MARK) {
+      inUnused = true
+      continue
+    }
+    if (!line) continue
+    if (inUnused) {
+      unused.push(line)
+      continue
+    }
+    if (line.charAt(0) !== "{") continue
+    try {
+      records.push(JSON.parse(line))
+    } catch (e) {
+    }
+  }
+  return { records: records, unused: unused }
+}
+
+function keySet(names) {
+  var out = {}
+  var list = names || []
+  for (var i = 0; i < list.length; i++) out[list[i]] = true
+  return out
+}
+
 function labelValue(labels, key) {
   var parts = String(labels || "").split(",")
   for (var i = 0; i < parts.length; i++) {
@@ -66,9 +295,23 @@ function labelValue(labels, key) {
   return ""
 }
 
+// Distinguishes "the label is absent" from "the label is set to an empty
+// string" — which is exactly how Docker marks an anonymous volume.
+function hasLabel(labels, key) {
+  var parts = String(labels || "").split(",")
+  for (var i = 0; i < parts.length; i++) {
+    var eq = parts[i].indexOf("=")
+    var name = eq < 0 ? trim(parts[i]) : trim(parts[i].substring(0, eq))
+    if (name === key) return true
+  }
+  return false
+}
+
 function composeProject(labels) {
   return labelValue(labels, "com.docker.compose.project")
 }
+
+// ---------------------------------------------------------------- containers
 
 function isUp(state) {
   return UP_STATES.indexOf(trim(state).toLowerCase()) !== -1
@@ -134,6 +377,7 @@ function normalizeContainer(raw) {
   var state = trim(raw && raw.State).toLowerCase()
   var status = trim(raw && raw.Status)
   var container = {
+    kind: "containers",
     id: trim(raw && raw.ID),
     name: sanitize(trim(raw && raw.Names).split(",")[0]),
     image: sanitize(raw && raw.Image),
@@ -161,6 +405,160 @@ function normalizeContainers(rawList) {
   }
   return out
 }
+
+// ---------------------------------------------------------------- images
+
+function normalizeImage(raw) {
+  var repository = trim(raw && raw.Repository)
+  var tag = trim(raw && raw.Tag)
+  var untagged = repository === "" || repository === "<none>"
+  var id = shortId(raw && raw.ID)
+  var reference = untagged ? "" : repository + (tag && tag !== "<none>" ? ":" + tag : "")
+  var containers = parseInt(trim(raw && raw.Containers), 10)
+  if (!isFinite(containers)) containers = -1
+
+  var image = {
+    kind: "images",
+    id: id,
+    // An untagged image has no name worth printing, so the id becomes one.
+    name: sanitize(untagged ? id : reference, 96),
+    reference: sanitize(reference, 96),
+    repository: sanitize(repository, 64),
+    tag: sanitize(tag, 40),
+    dangling: untagged,
+    containers: containers,
+    created: sanitize(raw && raw.CreatedSince, 24),
+    sizeBytes: parseSize(raw && raw.Size)
+  }
+  // A count Docker would not give us is treated as "in use": never invite
+  // someone to delete an image on the strength of a number we don't have.
+  image.inUse = containers !== 0
+  image.search = (image.name + " " + image.reference + " " + id).toLowerCase()
+  return image
+}
+
+function normalizeImages(rawList) {
+  var out = []
+  var list = rawList || []
+  for (var i = 0; i < list.length; i++) {
+    var image = normalizeImage(list[i])
+    if (isContainerId(image.id)) out.push(image)
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- volumes
+
+var ANONYMOUS_NAME = /^[0-9a-f]{64}$/
+
+function normalizeVolume(raw, unused) {
+  var name = trim(raw && raw.Name)
+  var labels = raw && raw.Labels
+  var anonymous = hasLabel(labels, "com.docker.volume.anonymous") || ANONYMOUS_NAME.test(name)
+  var links = parseInt(trim(raw && raw.Links), 10)
+
+  var volume = {
+    kind: "volumes",
+    id: name,
+    name: sanitize(anonymous ? shortId(name) : name, 96),
+    anonymous: anonymous,
+    driver: sanitize(raw && raw.Driver, 24),
+    mountpoint: trim(raw && raw.Mountpoint),
+    project: sanitize(composeProject(labels), 32),
+    service: sanitize(labelValue(labels, "com.docker.compose.volume"), 32),
+    links: isFinite(links) ? links : -1,
+    sizeBytes: parseSize(raw && raw.Size),
+    inUse: !(unused || {})[name]
+  }
+  volume.search = (volume.name + " " + name + " " + volume.project + " " + volume.service).toLowerCase()
+  return volume
+}
+
+function normalizeVolumes(rawList, unusedNames) {
+  var unused = keySet(unusedNames)
+  var out = []
+  var list = rawList || []
+  for (var i = 0; i < list.length; i++) {
+    var volume = normalizeVolume(list[i], unused)
+    if (isVolumeName(volume.id)) out.push(volume)
+  }
+  return out
+}
+
+// `docker system df -v` is the only place Docker will tell us what a volume
+// costs on disk, and it costs a second or two of daemon time to ask. Keep it
+// out of the listing call and fold its answer in when it arrives.
+function mergeVolumeUsage(volumes, usageRows) {
+  var sizes = {}
+  var rows = usageRows || []
+  for (var i = 0; i < rows.length; i++) {
+    var name = trim(rows[i] && rows[i].Name)
+    if (!name) continue
+    var links = parseInt(trim(rows[i].Links), 10)
+    sizes[name] = {
+      sizeBytes: parseSize(rows[i].Size),
+      links: isFinite(links) ? links : -1
+    }
+  }
+
+  var out = []
+  var list = volumes || []
+  for (var v = 0; v < list.length; v++) {
+    var volume = list[v]
+    var found = sizes[volume.id]
+    if (!found) {
+      out.push(volume)
+      continue
+    }
+    var merged = {}
+    for (var key in volume) merged[key] = volume[key]
+    if (found.sizeBytes >= 0) merged.sizeBytes = found.sizeBytes
+    if (found.links >= 0) merged.links = found.links
+    out.push(merged)
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- networks
+
+// Docker creates these three itself and refuses to remove them, so they are
+// never offered as something to clean up.
+var BUILTIN_NETWORKS = ["bridge", "host", "none"]
+
+function normalizeNetwork(raw, unused) {
+  var name = trim(raw && raw.Name)
+  var labels = raw && raw.Labels
+  var builtin = BUILTIN_NETWORKS.indexOf(name) !== -1
+
+  var network = {
+    kind: "networks",
+    id: trim(raw && raw.ID),
+    name: sanitize(name, 96),
+    driver: sanitize(raw && raw.Driver, 24),
+    scope: sanitize(raw && raw.Scope, 16),
+    project: sanitize(composeProject(labels), 32),
+    internal: trim(raw && raw.Internal) === "true",
+    ipv6: trim(raw && raw.IPv6) === "true",
+    builtin: builtin,
+    sizeBytes: -1
+  }
+  network.inUse = builtin || !(unused || {})[name]
+  network.search = (network.name + " " + network.driver + " " + network.project).toLowerCase()
+  return network
+}
+
+function normalizeNetworks(rawList, unusedNames) {
+  var unused = keySet(unusedNames)
+  var out = []
+  var list = rawList || []
+  for (var i = 0; i < list.length; i++) {
+    var network = normalizeNetwork(list[i], unused)
+    if (isContainerId(network.id)) out.push(network)
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- stats
 
 function parsePercent(value) {
   var match = String(value || "").match(/(-?\d+(?:\.\d+)?)\s*%/)
@@ -191,6 +589,68 @@ function indexStats(rawList) {
   return out
 }
 
+// ---------------------------------------------------------------- disk usage
+
+var USAGE_TYPE = {
+  containers: "Containers",
+  images: "Images",
+  volumes: "Local Volumes",
+  buildCache: "Build Cache"
+}
+
+function indexUsage(rawList) {
+  var out = {}
+  var list = rawList || []
+  for (var i = 0; i < list.length; i++) {
+    var row = list[i]
+    var type = trim(row && row.Type)
+    if (!type) continue
+    var count = parseInt(trim(row.TotalCount), 10)
+    var active = parseInt(trim(row.Active), 10)
+    out[type] = {
+      type: type,
+      count: isFinite(count) ? count : -1,
+      active: isFinite(active) ? active : -1,
+      sizeBytes: parseSize(row.Size),
+      reclaimableBytes: parseSize(row.Reclaimable)
+    }
+  }
+  return out
+}
+
+function usageFor(usage, tabKey) {
+  var type = USAGE_TYPE[tabKey]
+  if (!type) return null
+  return (usage || {})[type] || null
+}
+
+// The footer line. Networks cost no disk, so they report how many of them
+// are idle instead of how many bytes they hold.
+function usageText(usage, tabKey, items) {
+  var list = items || []
+  if (tabKey === "networks") {
+    var idle = 0
+    for (var i = 0; i < list.length; i++) {
+      if (!list[i].inUse) idle++
+    }
+    return join([plural(list.length, "network"), idle > 0 ? idle + " unused" : ""])
+  }
+
+  var entry = usageFor(usage, tabKey)
+  if (!entry) return list.length > 0 ? plural(list.length, tabNoun(tabKey)) : ""
+
+  var total = entry.count >= 0 ? plural(entry.count, tabNoun(tabKey)) : ""
+  var size = formatSize(entry.sizeBytes)
+  var free = entry.reclaimableBytes > 0 ? formatSize(entry.reclaimableBytes) + " reclaimable" : ""
+  return join([total, size, free])
+}
+
+function tabNoun(tabKey) {
+  return TABS[tabIndex(tabKey)].noun
+}
+
+// ---------------------------------------------------------------- filtering
+
 function matchesFilter(container, query) {
   var needle = trim(query).toLowerCase()
   if (!needle) return true
@@ -211,9 +671,33 @@ function filterContainers(containers, query) {
   return out
 }
 
+// Images, volumes and networks each carry a precomputed `search` field, so
+// one filter covers all three.
+function filterResources(resources, query) {
+  var needle = trim(query).toLowerCase()
+  var list = resources || []
+  if (!needle) return list.slice()
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i].search || "").indexOf(needle) !== -1) out.push(list[i])
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- sections
+
 function compareContainers(a, b) {
   if (a.up !== b.up) return a.up ? -1 : 1
   if (!a.up && a.failing !== b.failing) return a.failing ? -1 : 1
+  return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0)
+}
+
+// Biggest first: the reason to open these tabs is to find what is eating the
+// disk. Equal (or unknown) sizes fall back to name so the order is stable.
+function compareBySize(a, b) {
+  var left = typeof a.sizeBytes === "number" ? a.sizeBytes : -1
+  var right = typeof b.sizeBytes === "number" ? b.sizeBytes : -1
+  if (left !== right) return right - left
   return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0)
 }
 
@@ -249,11 +733,14 @@ function sectionsFor(containers) {
     sections.push({
       key: order[j],
       title: order[j] === UNGROUPED ? "Ungrouped" : sanitize(order[j], 32),
+      items: members,
       containers: members,
       runningIds: running,
       stoppedIds: stopped,
       runningCount: running.length,
-      total: members.length
+      total: members.length,
+      tally: running.length + "/" + members.length,
+      toggle: running.length > 0 ? "stop" : (members.length > 0 ? "start" : "")
     })
   }
 
@@ -261,37 +748,356 @@ function sectionsFor(containers) {
   return sections
 }
 
-function rowsFor(sections) {
+// Images, volumes and networks split on one question: can this be deleted
+// right now? Unused comes first, because that is what the tab is for.
+function usageSectionsFor(resources) {
+  var list = resources || []
+  var unused = []
+  var used = []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].inUse) used.push(list[i])
+    else unused.push(list[i])
+  }
+  unused.sort(compareBySize)
+  used.sort(compareBySize)
+
+  var sections = []
+  if (unused.length > 0) sections.push(usageSection("unused", "Unused", unused))
+  if (used.length > 0) sections.push(usageSection("in-use", "In use", used))
+  return sections
+}
+
+function usageSection(key, title, items) {
+  var bytes = sumSizes(items)
+  return {
+    key: key,
+    title: title,
+    items: items,
+    containers: items,
+    total: items.length,
+    tally: join([String(items.length), formatSize(bytes)]),
+    toggle: ""
+  }
+}
+
+function sectionByKey(sections, key) {
+  var list = sections || []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].key === key) return list[i]
+  }
+  return null
+}
+
+function sectionAction(section) {
+  if (!section || section.total === 0) return null
+  if (section.runningCount === undefined) return null
+  if (section.runningCount > 0) return { verb: "stop", ids: section.runningIds }
+  return { verb: "start", ids: section.stoppedIds }
+}
+
+// ---------------------------------------------------------------- rows
+
+// One row shape for every tab, so a single delegate renders all four and a
+// ListModel never has to be told about a new field halfway through.
+var ROW_FIELDS = ["kind", "name", "subtitle", "status", "meta", "up", "failing",
+  "restarting", "unhealthy", "muted", "removable", "sectionKey", "sectionTitle",
+  "sectionTally", "sectionToggle", "firstSection"]
+
+// The seven fields a row carries as booleans. Everything else is a string.
+var ROW_BOOLEANS = ["up", "failing", "restarting", "unhealthy", "muted", "removable",
+  "firstSection"]
+
+// A ListModel takes its role types from whatever object it is first handed and
+// drops any field it cannot type — and it re-derives them after a clear(), so
+// a tab switch can leave it with roles it silently refused to make. Hand it a
+// freshly built plain object with every field present and explicitly typed,
+// rather than the row object the rest of the panel is still holding on to.
+function rowRecord(row) {
+  var out = { key: String(row.key), id: String(row.id) }
+  for (var i = 0; i < ROW_FIELDS.length; i++) {
+    var field = ROW_FIELDS[i]
+    var value = row[field]
+    out[field] = ROW_BOOLEANS.indexOf(field) !== -1
+      ? value === true
+      : String(value === undefined || value === null ? "" : value)
+  }
+  return out
+}
+
+function blankRow(key, id, kind) {
+  return {
+    key: key,
+    id: id,
+    kind: kind,
+    name: "",
+    subtitle: "",
+    status: "",
+    meta: "",
+    up: false,
+    failing: false,
+    restarting: false,
+    unhealthy: false,
+    muted: false,
+    removable: true,
+    sectionKey: "",
+    sectionTitle: "",
+    sectionTally: "",
+    sectionToggle: "",
+    firstSection: false
+  }
+}
+
+function containerRow(container) {
+  var row = blankRow(container.id, container.id, "containers")
+  row.name = container.name
+  row.subtitle = subtitleText(container)
+  row.status = statusText(container)
+  row.up = container.up
+  row.failing = container.failing
+  row.restarting = container.state === "restarting"
+  row.unhealthy = container.health === "unhealthy"
+  // Only a container that is already down. A row can be a few seconds stale,
+  // and a stale row must never be the thing that deletes a live container.
+  row.removable = !container.up
+  return row
+}
+
+function imageRow(image) {
+  var row = blankRow(image.id, image.id, "images")
+  row.name = image.name
+  row.subtitle = sanitize(join([
+    image.dangling ? "untagged" : image.id,
+    image.created,
+    image.containers > 0 ? plural(image.containers, "container") : ""
+  ]), 96)
+  row.meta = formatSize(image.sizeBytes)
+  row.up = image.inUse
+  row.muted = !image.inUse
+  return row
+}
+
+function volumeRow(volume) {
+  var row = blankRow(volume.id, volume.id, "volumes")
+  row.name = volume.name
+  row.subtitle = sanitize(join([
+    volume.project,
+    volume.anonymous ? "anonymous" : "",
+    volume.driver && volume.driver !== "local" ? volume.driver : "",
+    volume.links > 0 ? plural(volume.links, "link") : ""
+  ]), 96)
+  row.meta = formatSize(volume.sizeBytes)
+  row.up = volume.inUse
+  row.muted = !volume.inUse
+  return row
+}
+
+function networkRow(network) {
+  var row = blankRow(network.id, network.id, "networks")
+  row.name = network.name
+  row.subtitle = sanitize(join([
+    network.driver,
+    network.builtin ? "predefined" : network.project,
+    network.internal ? "internal" : "",
+    network.ipv6 ? "ipv6" : ""
+  ]), 96)
+  row.up = network.inUse
+  row.muted = !network.inUse
+  // Docker made bridge, host and none itself and will not let them go, so
+  // the panel does not offer a button that can only ever fail.
+  row.removable = !network.builtin
+  return row
+}
+
+var ROW_BUILDERS = {
+  containers: containerRow,
+  images: imageRow,
+  volumes: volumeRow,
+  networks: networkRow
+}
+
+function rowsForSections(sections, kind) {
+  var build = ROW_BUILDERS[kind] || containerRow
   var rows = []
   var list = sections || []
   for (var i = 0; i < list.length; i++) {
     var section = list[i]
-    for (var j = 0; j < section.containers.length; j++) {
-      var c = section.containers[j]
-      rows.push({
-        key: c.id,
-        id: c.id,
-        name: c.name,
-        subtitle: subtitleText(c),
-        status: statusText(c),
-        up: c.up,
-        failing: c.failing,
-        restarting: c.state === "restarting",
-        unhealthy: c.health === "unhealthy",
-        sectionKey: section.key,
-        sectionTitle: j === 0 ? section.title : "",
-        sectionRunning: section.runningCount,
-        sectionTotal: section.total,
-        firstSection: i === 0
-      })
+    var items = section.items || section.containers || []
+    for (var j = 0; j < items.length; j++) {
+      var row = build(items[j])
+      row.sectionKey = section.key
+      row.sectionTitle = j === 0 ? section.title : ""
+      row.sectionTally = section.tally
+      row.sectionToggle = section.toggle
+      row.firstSection = i === 0
+      rows.push(row)
     }
   }
   return rows
 }
 
-var ROW_FIELDS = ["name", "subtitle", "status", "up", "failing", "restarting",
-  "unhealthy", "sectionKey", "sectionTitle", "sectionRunning", "sectionTotal",
-  "firstSection"]
+function rowsFor(sections) {
+  return rowsForSections(sections, "containers")
+}
+
+// ---------------------------------------------------------------- actions
+//
+// A row's buttons are data, so the delegate that draws them never has to
+// know which tab it is rendering, and the verbs stay testable.
+
+// Every action carries every field, `danger` included. A Repeater builds its
+// roles from the objects it is handed, and an array whose members disagree
+// about which keys exist leaves it with roles it cannot make.
+function action(verb, glyph, tooltip, danger) {
+  return { verb: verb, glyph: glyph, tooltip: tooltip, danger: danger === true }
+}
+
+function actionsFor(row) {
+  if (!row) return []
+  if (row.kind === "containers") {
+    var actions = [action("logs", Glyph.logs, "Follow logs in a terminal  (o)", false)]
+    if (row.up) {
+      actions.push(action("shell", Glyph.shell, "Open a shell in the container  (s)", false))
+      actions.push(action("restart", Glyph.restart, "Restart  (r)", false))
+      actions.push(action("stop", Glyph.stop, "Stop  (enter)", true))
+    } else {
+      if (row.removable) actions.push(action("remove", Glyph.remove, "Remove this container  (x)", true))
+      actions.push(action("start", Glyph.play, "Start  (enter)", false))
+    }
+    return actions
+  }
+
+  var out = [action("copy", Glyph.copy, copyTooltip(row.kind) + "  (c)", false)]
+  if (row.removable) {
+    out.push(action("remove", Glyph.remove, "Remove this " + tabNoun(row.kind) + "  (x)", true))
+  }
+  return out
+}
+
+// Whether a row offers a verb at all — a running container has no remove
+// button, so the x key must not quietly remove it either.
+function allowsVerb(row, verb) {
+  var actions = actionsFor(row)
+  for (var i = 0; i < actions.length; i++) {
+    if (actions[i].verb === verb) return true
+  }
+  return false
+}
+
+function copyTooltip(kind) {
+  if (kind === "volumes") return "Copy the mount path"
+  if (kind === "networks") return "Copy the network id"
+  if (kind === "images") return "Copy the image id"
+  return "Copy the container id"
+}
+
+// What a click on the row body copies: whichever string is the one you would
+// actually want to paste somewhere.
+function copyValue(kind, item) {
+  if (!item) return ""
+  if (kind === "volumes") return item.mountpoint || item.id
+  return item.id
+}
+
+// ---------------------------------------------------------------- commands
+
+function removeCommand(kind, id) {
+  if (kind === "containers") return isContainerId(id) ? ["docker", "rm", id] : null
+  if (kind === "images") return isContainerId(id) ? ["docker", "rmi", id] : null
+  if (kind === "volumes") return isVolumeName(id) ? ["docker", "volume", "rm", id] : null
+  if (kind === "networks") return isContainerId(id) ? ["docker", "network", "rm", id] : null
+  return null
+}
+
+// Deliberately without -f on every one of these. A stale row must never be
+// able to destroy something that came back to life since the last refresh.
+var PRUNE = {
+  containers: {
+    label: "Remove stopped",
+    args: ["docker", "container", "prune", "-f"],
+    message: "Remove every stopped container?"
+  },
+  images: {
+    label: "Prune unused",
+    args: ["docker", "image", "prune", "-a", "-f"],
+    message: "Remove every image that no container is using?"
+  },
+  volumes: {
+    label: "Prune unused",
+    args: ["docker", "volume", "prune", "-a", "-f"],
+    message: "Remove every volume that no container is using? Whatever is stored in them goes with them."
+  },
+  networks: {
+    label: "Prune unused",
+    args: ["docker", "network", "prune", "-f"],
+    message: "Remove every network that no container is using?"
+  }
+}
+
+function pruneSpec(tabKey) {
+  return PRUNE[tabKey] || null
+}
+
+// True only when Docker has told us there is something to reclaim, so the
+// button is never live on a tab that is already clean.
+function canPrune(tabKey, usage, items) {
+  var list = items || []
+  if (tabKey === "networks") {
+    for (var i = 0; i < list.length; i++) {
+      if (!list[i].inUse) return true
+    }
+    return false
+  }
+  var entry = usageFor(usage, tabKey)
+  if (entry && entry.reclaimableBytes > 0) return true
+  for (var j = 0; j < list.length; j++) {
+    if (!list[j].inUse) return true
+  }
+  return false
+}
+
+function removeMessage(kind, item) {
+  if (!item) return ""
+  var noun = tabNoun(kind)
+  var name = item.name || item.id
+  if (kind === "volumes") {
+    return item.inUse
+      ? "Remove volume " + name + "? A container is still using it, so Docker will refuse."
+      : "Remove volume " + name + "? Whatever is stored in it goes with it."
+  }
+  if (kind === "images" && item.inUse) {
+    return "Remove image " + name + "? A container still references it, so Docker will refuse."
+  }
+  return "Remove " + noun + " " + name + "?"
+}
+
+// ---------------------------------------------------------------- lookup
+
+function itemById(items, id) {
+  var list = items || []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id === id) return list[i]
+  }
+  return null
+}
+
+function containerById(containers, id) {
+  return itemById(containers, id)
+}
+
+function containerAtCursor(containers, rows, cursorIndex) {
+  var list = rows || []
+  if (cursorIndex < 0 || cursorIndex >= list.length) return null
+  return itemById(containers, list[cursorIndex].id)
+}
+
+function clampCursor(cursorIndex, total) {
+  if (total <= 0) return 0
+  if (cursorIndex < 0) return 0
+  if (cursorIndex > total - 1) return total - 1
+  return cursorIndex
+}
+
+// ---------------------------------------------------------------- reconcile
 
 function reconcilePlan(currentKeys, nextRows) {
   var keys = (currentKeys || []).slice()
@@ -321,34 +1127,7 @@ function reconcilePlan(currentKeys, nextRows) {
   return ops
 }
 
-function containerById(containers, id) {
-  var list = containers || []
-  for (var i = 0; i < list.length; i++) {
-    if (list[i].id === id) return list[i]
-  }
-  return null
-}
-
-function containerAtCursor(containers, rows, cursorIndex) {
-  var list = rows || []
-  if (cursorIndex < 0 || cursorIndex >= list.length) return null
-  return containerById(containers, list[cursorIndex].id)
-}
-
-function sectionByKey(sections, key) {
-  var list = sections || []
-  for (var i = 0; i < list.length; i++) {
-    if (list[i].key === key) return list[i]
-  }
-  return null
-}
-
-function clampCursor(cursorIndex, total) {
-  if (total <= 0) return 0
-  if (cursorIndex < 0) return 0
-  if (cursorIndex > total - 1) return total - 1
-  return cursorIndex
-}
+// ---------------------------------------------------------------- summaries
 
 function counts(containers) {
   var list = containers || []
@@ -388,8 +1167,23 @@ function subtitleText(container) {
   return sanitize(line, 96)
 }
 
-function sectionAction(section) {
-  if (!section || section.total === 0) return null
-  if (section.runningCount > 0) return { verb: "stop", ids: section.runningIds }
-  return { verb: "start", ids: section.stoppedIds }
+// The one line the panel shows when a tab has nothing to show. Says why,
+// which is usually more useful than saying what.
+function emptyText(tabKey, state) {
+  if (!state.everLoaded) return "Loading…"
+  if (state.permissionDenied) return "No access to the Docker socket"
+  if (!state.daemonReachable) return "Docker daemon unreachable"
+  if (state.filtered) return "Nothing on this tab matches that filter"
+  if (tabKey === "containers") return state.showStopped ? "No containers" : "No running containers"
+  return "No " + tabNoun(tabKey) + "s"
+}
+
+// Docker's own error text, trimmed down to the one line that says something.
+function errorText(raw) {
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = trim(lines[i]).replace(/^Error(?: response from daemon)?:\s*/i, "")
+    if (line) return sanitize(line, 160)
+  }
+  return ""
 }

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "kayooliveira.omadocker",
   "name": "OmaDocker",
-  "version": "2.0.0",
+  "version": "0.2.0",
   "author": "Kayo Oliveira",
   "license": "MIT",
-  "description": "Docker containers in the Omarchy bar: what is running, what died, live CPU and memory, and start/stop/restart/logs without a terminal.",
+  "description": "Docker in the Omarchy bar: containers, images, volumes and networks on four tabs. Live CPU and memory, start/stop/restart, logs and a shell without a terminal, and one keystroke to reclaim whatever nothing is using.",
   "homepage": "https://github.com/kayooliveira/omadocker",
   "kinds": [
     "bar-widget"
@@ -15,14 +15,16 @@
   },
   "barWidget": {
     "displayName": "OmaDocker",
-    "description": "Groups containers by Compose project, shows live CPU and memory for the running ones, and starts, stops, restarts or tails the logs of any of them from the panel.",
+    "description": "Four tabs — containers grouped by Compose project with live CPU and memory, plus images, volumes and networks sorted biggest-first with the unused ones on top and a prune button that says what it is about to delete. Driven from the keyboard: 1-4 or h/l jump between tabs, j/k move, enter starts or stops, o tails the logs, s opens a shell, r restarts, x removes, p prunes, c copies, / filters, u refreshes, d opens lazydocker, and ? lists the lot inside the panel.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 15,
+      "defaultTab": "Containers",
       "showStopped": true,
       "showStats": true,
+      "showVolumeSizes": true,
       "hideWhenEmpty": false
     },
     "schema": [
@@ -37,6 +39,14 @@
         "defaultValue": 15
       },
       {
+        "key": "defaultTab",
+        "type": "enum",
+        "label": "Tab the panel opens on",
+        "description": "Where the panel lands every time it opens. Press 1-4, or h and l, to move between tabs once it is open.",
+        "options": ["Containers", "Images", "Volumes", "Networks"],
+        "defaultValue": "Containers"
+      },
+      {
         "key": "showStopped",
         "type": "boolean",
         "label": "Show stopped containers",
@@ -48,6 +58,13 @@
         "type": "boolean",
         "label": "Show CPU and memory",
         "description": "Off skips the docker stats call entirely. Worth turning off on a laptop: sampling every running container costs about a second of work each time the panel is open.",
+        "defaultValue": true
+      },
+      {
+        "key": "showVolumeSizes",
+        "type": "boolean",
+        "label": "Measure what each volume costs",
+        "description": "Asks the daemon to walk every volume on disk, which takes a second or two on a busy machine. Off keeps the volume list instant and leaves the per-volume sizes blank; the reclaimable total in the footer still works either way.",
         "defaultValue": true
       },
       {

@@ -142,11 +142,12 @@ test("a row picking up its section's header updates in place", () => {
 
 test("the section tally on every row of a project follows the project", () => {
   const before = rowsOf([make("a", "p"), make("b", "p", "exited")])
-  eq(before.map(r => r.sectionRunning), [1, 1])
+  eq(before.map(r => r.sectionTally), ["1/2", "1/2"])
+  eq(before.map(r => r.sectionToggle), ["stop", "stop"])
 
   const after = rowsOf([make("a", "p"), make("b", "p")])
   const result = apply(before, after)
-  eq(result.model.map(r => r.sectionRunning), [2, 2])
+  eq(result.model.map(r => r.sectionTally), ["2/2", "2/2"])
   eq(Model.reconcilePlan(before.map(r => r.key), after), [], "still no rebuild")
 })
 
