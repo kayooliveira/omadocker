@@ -55,6 +55,7 @@ same list.
 | `r` | Restart it |
 | `o` | Follow its logs in a terminal |
 | `s` | Open a shell inside it |
+| `b` | Open its first published port in the browser |
 | `n` | Copy its name |
 
 ### Cleaning up
@@ -77,7 +78,9 @@ Both always ask first.
 | `?` | Show the shortcut sheet |
 
 Clicking works everywhere too: a row copies its identifier, the buttons at its right edge do
-what their tooltips say, and a project header starts or stops the whole project.
+what their tooltips say, and a project header starts or stops the whole project. A running
+container with a published port gets a browser button that opens its first host port at
+`http://localhost:<port>`.
 
 ## Installation
 

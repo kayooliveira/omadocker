@@ -256,6 +256,7 @@ Panel {
   function dispatch(kind, id, verb) {
     var item = Model.itemById(items, id)
     if (verb === "copy") { copyText(Model.copyValue(kind, item)); return }
+    if (verb === "browser") { openPublishedPort(item); return }
     if (verb === "logs") { viewLogs(id); return }
     if (verb === "shell") { openShell(id); return }
     if (verb === "remove") { askRemove(kind, id); return }
@@ -310,6 +311,13 @@ Panel {
     if (!value || copyProcess.running) return
     copyProcess.command = ["wl-copy", "--trim-newline", String(value)]
     copyProcess.running = true
+  }
+
+  function openPublishedPort(container) {
+    var url = Model.containerUrl(container)
+    if (!url) return
+    root.close()
+    Quickshell.execDetached(["omarchy-launch-browser", url])
   }
 
   function viewLogs(id) {
@@ -381,6 +389,7 @@ Panel {
     if (root.tab !== "containers" || !cursorItem) return
     if (key === "o") viewLogs(cursorItem.id)
     else if (key === "s") { if (cursorItem.up) openShell(cursorItem.id) }
+    else if (key === "b") openPublishedPort(cursorItem)
     else if (key === "r") restartContainer(cursorItem)
     else if (key === "n") copyText(cursorItem.name)
   }
