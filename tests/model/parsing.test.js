@@ -95,6 +95,17 @@ test("hostPorts dedupes the two address families Docker prints", () => {
   eq(Model.hostPorts(""), [])
 })
 
+test("containerUrl opens the first published host port on localhost", () => {
+  eq(Model.containerUrl(container({
+    Ports: "0.0.0.0:3000->3000/tcp, 0.0.0.0:9000->9000/tcp"
+  })), "http://localhost:3000")
+  eq(Model.containerUrl(container({ Ports: "3000/tcp" })), "")
+  eq(Model.containerUrl(container({
+    State: "exited", Status: "Exited (0) 1 hour ago", Ports: "0.0.0.0:3000->3000/tcp"
+  })), "", "a stopped container has no reachable published port")
+  eq(Model.containerUrl(null), "")
+})
+
 test("shortImage drops the registry and the tag, but not a plain namespace", () => {
   eq(Model.shortImage("ghcr.io/acme/api:1"), "acme/api")
   eq(Model.shortImage("minio/mc:RELEASE.2025-08-13T08-35-41Z"), "minio/mc")

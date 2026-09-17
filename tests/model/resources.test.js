@@ -321,6 +321,16 @@ test("a running container offers logs, a shell, restart and stop", () => {
   eq(Model.actionsFor(row).filter(a => a.danger).map(a => a.verb), ["stop"])
 })
 
+test("a running container with a published port offers a browser button", () => {
+  const row = Model.rowsFor(Model.sectionsFor([
+    make("web", "p", "running", { Ports: "0.0.0.0:8000->80/tcp" })
+  ]))[0]
+  eq(row.url, "http://localhost:8000")
+  eq(Model.actionsFor(row).map(a => a.verb), ["browser", "logs", "shell", "restart", "stop"])
+  ok(Model.actionsFor(row)[0].tooltip.indexOf("http://localhost:8000") !== -1)
+  eq(Model.allowsVerb(row, "browser"), true)
+})
+
 test("a stopped container offers removal in place of the shell", () => {
   const row = Model.rowsFor(Model.sectionsFor([make("a", "p", "exited")]))[0]
   eq(Model.actionsFor(row).map(a => a.verb), ["logs", "remove", "start"])
@@ -508,7 +518,7 @@ test("the shortcut sheet is one list, grouped in the order it was written", () =
 
 test("every key the panel actually listens for is written down", () => {
   const documented = Model.SHORTCUTS.map(s => s.keys).join(" ")
-  for (const key of ["1 – 4", "j", "x", "p", "c", "n", "u", "d", "o", "r", "s", "/", "?", "enter", "esc"]) {
+  for (const key of ["1 – 4", "j", "x", "p", "c", "n", "u", "d", "b", "o", "r", "s", "/", "?", "enter", "esc"]) {
     ok(documented.indexOf(key) !== -1, key + " is documented")
   }
 })

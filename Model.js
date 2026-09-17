@@ -89,6 +89,7 @@ var SHORTCUTS = [
   { group: "Containers", keys: "r", text: "Restart it" },
   { group: "Containers", keys: "o", text: "Follow its logs in a terminal" },
   { group: "Containers", keys: "s", text: "Open a shell inside it" },
+  { group: "Containers", keys: "b", text: "Open its first published port in the browser" },
   { group: "Containers", keys: "n", text: "Copy its name" },
 
   { group: "Clean up", keys: "x", text: "Remove whatever the cursor is on" },
@@ -355,6 +356,14 @@ function hostPorts(ports) {
     out.push(port)
   }
   return out
+}
+
+function containerUrl(container) {
+  if (!container || !container.up || !container.ports || container.ports.length === 0) return ""
+  var port = String(container.ports[0])
+  var number = Number(port)
+  if (!/^\d{1,5}$/.test(port) || !isFinite(number) || number < 1 || number > 65535) return ""
+  return "http://localhost:" + port
 }
 
 function shortImage(image) {
@@ -799,7 +808,7 @@ function sectionAction(section) {
 
 // One row shape for every tab, so a single delegate renders all four and a
 // ListModel never has to be told about a new field halfway through.
-var ROW_FIELDS = ["kind", "name", "subtitle", "status", "meta", "up", "failing",
+var ROW_FIELDS = ["kind", "name", "subtitle", "status", "meta", "url", "up", "failing",
   "restarting", "unhealthy", "muted", "removable", "sectionKey", "sectionTitle",
   "sectionTally", "sectionToggle", "firstSection"]
 
@@ -833,6 +842,7 @@ function blankRow(key, id, kind) {
     subtitle: "",
     status: "",
     meta: "",
+    url: "",
     up: false,
     failing: false,
     restarting: false,
@@ -852,6 +862,7 @@ function containerRow(container) {
   row.name = container.name
   row.subtitle = subtitleText(container)
   row.status = statusText(container)
+  row.url = containerUrl(container)
   row.up = container.up
   row.failing = container.failing
   row.restarting = container.state === "restarting"
@@ -954,7 +965,9 @@ function action(verb, glyph, tooltip, danger) {
 function actionsFor(row) {
   if (!row) return []
   if (row.kind === "containers") {
-    var actions = [action("logs", Glyph.logs, "Follow logs in a terminal  (o)", false)]
+    var actions = []
+    if (row.url) actions.push(action("browser", Glyph.link, "Open " + row.url + " in the browser  (b)", false))
+    actions.push(action("logs", Glyph.logs, "Follow logs in a terminal  (o)", false))
     if (row.up) {
       actions.push(action("shell", Glyph.shell, "Open a shell in the container  (s)", false))
       actions.push(action("restart", Glyph.restart, "Restart  (r)", false))
