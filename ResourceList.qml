@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // The one list the panel draws, whichever tab is showing. Every tab hands it
@@ -27,7 +28,7 @@ Item {
   property bool cursorActive: false
   property bool cursorFromKeyboard: false
 
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property string fontFamily: Style.font.family
   property int maxHeight: Style.space(560)
 
@@ -182,7 +183,7 @@ Item {
         iconText: header.stopping ? Model.Glyph.stop : Model.Glyph.play
         tooltipText: (header.stopping ? "Stop " : "Start ") + header.title
         foreground: root.foreground
-        hoverColor: header.stopping ? Color.urgent : root.foreground
+        hoverColor: header.stopping ? Commons.Color.urgent : root.foreground
         fontFamily: root.fontFamily
         fontSize: Style.font.iconSmall
         size: Style.space(20)
@@ -244,8 +245,8 @@ Item {
           radius: width / 2
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
-          color: rowSurface.row.failing ? Color.urgent
-            : (rowSurface.row.up ? Color.accent : "transparent")
+          color: rowSurface.row.failing ? Commons.Color.urgent
+            : (rowSurface.row.up ? Commons.Color.accent : "transparent")
           border.width: !rowSurface.row.up && !rowSurface.row.failing ? 1 : 0
           border.color: root.dim
 
@@ -286,7 +287,7 @@ Item {
               visible: rowSurface.row.unhealthy
               anchors.verticalCenter: parent.verticalCenter
               text: Model.Glyph.unhealthy
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.iconSmall
             }
@@ -308,7 +309,7 @@ Item {
             visible: text !== "" && !rowSurface.row.up
             text: rowSurface.row.status
             textFormat: Text.PlainText
-            color: rowSurface.row.failing ? Color.urgent : root.dim
+            color: rowSurface.row.failing ? Commons.Color.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
@@ -345,7 +346,7 @@ Item {
               iconText: modelData.glyph
               tooltipText: modelData.tooltip
               foreground: root.foreground
-              hoverColor: modelData.danger ? Color.urgent : root.foreground
+              hoverColor: modelData.danger ? Commons.Color.urgent : root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.iconSmall
               size: Style.space(22)
@@ -418,7 +419,7 @@ Item {
         width: meter.known ? parent.width * meter.fraction : 0
         height: parent.height
         radius: parent.radius
-        color: meter.percent >= 85 ? Color.urgent : Color.accent
+        color: meter.percent >= 85 ? Commons.Color.urgent : Commons.Color.accent
 
         Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
       }

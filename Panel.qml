@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 Panel {
@@ -54,7 +55,7 @@ Panel {
   property bool cursorActive: false
   property bool cursorFromKeyboard: false
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.5)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
@@ -543,7 +544,7 @@ Panel {
     dimmed: root.counts.running === 0
     active: root.counts.alerting > 0 || root.counts.running > 0
     useActiveColor: true
-    activeColor: root.counts.alerting > 0 ? Color.urgent : Color.accent
+    activeColor: root.counts.alerting > 0 ? Commons.Color.urgent : Commons.Color.accent
     tooltipText: "OmaDocker · " + Model.summaryText(root.containers, root.daemonReachable)
 
     onPressed: function(b) {
@@ -609,7 +610,7 @@ Panel {
 
             iconComponent: Text {
               text: Model.Glyph.docker
-              color: root.counts.alerting > 0 ? Color.urgent : root.foreground
+              color: root.counts.alerting > 0 ? Commons.Color.urgent : root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.display
             }
@@ -647,7 +648,7 @@ Panel {
                 iconText: Model.Glyph.stop
                 tooltipText: "Stop every running container"
                 foreground: root.foreground
-                hoverColor: Color.urgent
+                hoverColor: Commons.Color.urgent
                 fontFamily: root.fontFamily
                 onClicked: root.stopEverything()
               }
@@ -762,7 +763,7 @@ Panel {
               anchors.top: parent.top
               text: Model.Glyph.alert
               textFormat: Text.PlainText
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.iconSmall
             }
@@ -776,7 +777,7 @@ Panel {
               anchors.top: parent.top
               text: root.lastError
               textFormat: Text.PlainText
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -860,7 +861,7 @@ Panel {
         z: 5
         opened: root.helpOpen
         foreground: root.foreground
-        background: Color.popups.background
+        background: Commons.Color.popups.background
         fontFamily: root.fontFamily
         onDismissed: root.helpOpen = false
       }
@@ -872,7 +873,7 @@ Panel {
         opened: root.confirmOpen
         message: root.confirmMessage
         confirmText: root.confirmLabel
-        background: Color.popups.background
+        background: Commons.Color.popups.background
         foreground: root.foreground
         fontFamily: root.fontFamily
         onCanceled: root.closeConfirm()
